@@ -1,0 +1,38 @@
+﻿
+========== DELTA API DIAGNOSTIC ==========
+API Key: "DVvtMmb1yKkU88wsS3YXVhZ8wC0PRZ"
+API Key length: 30
+API Key hex: 445676744d6d6231794b6b55383877735333595856685a3877433050525a
+API Secret: "rCepVv..."
+API Secret length: 60
+Base URL: https://api.india.delta.exchange
+==========================================
+
+--- Test 1: Public endpoint (no auth) ---
+Γ£à Public API works. BTC price: 66974.88896695
+
+--- Test 2: Private endpoint (with auth) ---
+Timestamp: 1775290539
+Prehash message: "GET1775290539/v2/wallet/balances"
+Signature: 79a5e3e3fb3d4f401f86a2a8ebf30a0183a522511c87364be17d5b3c6c59f07e
+Headers: {
+  "api-key": "DVvtMmb1yKkU88wsS3YXVhZ8wC0PRZ",
+  "signature": "79a5e3e3fb3d4f401f86a2a8ebf30a0183a522511c87364be17d5b3c6c59f07e",
+  "timestamp": "1775290539",
+  "User-Agent": "CryptoBOT/1.0",
+  "Content-Type": "application/json"
+}
+Γ¥î AUTH FAILED: Request failed with status code 401
+Status: 401
+Full Response Body: {
+  "error": {
+    "code": "ip_not_whitelisted_for_api_key",
+    "context": {
+      "client_ip": "2405:f600:8:cedd:a540:e446:866a:35d9"
+    }
+  },
+  "success": false
+}
+
+========== DIAGNOSTIC COMPLETE ==========
+

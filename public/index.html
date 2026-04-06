@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="description" content="CryptoBOT Delta - Professional automated trading bot for Delta Exchange India. Advanced strategies, risk management, and real-time market data.">
+    <meta name="theme-color" content="#040507">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>CryptoBOT Delta | Automated Trading Bot</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+</head>
+<body>
+
+<div id="app">
+
+    <!-- ========== TOP HEADER ========== -->
+    <header class="top-header" id="topHeader">
+        <div class="header-left">
+            <div class="header-logo">C</div>
+            <div class="header-title">
+                <h1>CryptoBOT</h1>
+                <span>Delta Exchange India</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="status-indicator offline" id="apiStatus">
+                <span class="dot"></span>
+                <span id="apiStatusText">Offline</span>
+            </div>
+            <button class="btn-bot-toggle start" id="btnBotToggle" onclick="App.toggleBot()">
+                <span class="pulse-dot"></span>
+                <span id="btnBotText">START</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- ========== MAIN CONTENT ========== -->
+    <main class="main-content">
+
+        <!-- ===== DASHBOARD PAGE ===== -->
+        <div class="page active" id="page-dashboard">
+            
+            <!-- Stats Grid -->
+            <div class="stats-grid" id="dashboardStats">
+                <div class="stat-card">
+                    <div class="stat-label">💰 Balance</div>
+                    <div class="stat-value" id="statBalance">₹0</div>
+                    <div class="stat-sub" id="statCurrency">INR</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">📊 P&L</div>
+                    <div class="stat-value" id="statPnl">₹0</div>
+                    <div class="stat-sub">Today</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">🏆 Win Rate</div>
+                    <div class="stat-value" id="statWinRate">0%</div>
+                    <div class="stat-sub" id="statTradeCount">0 trades</div>
+                </div>
+            </div>
+
+            <!-- Additional Info -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">📈 Trades</div>
+                    <div class="stat-value" id="statTotalTrades">0</div>
+                    <div class="stat-sub">By BOT</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">🔒 Min Bal</div>
+                    <div class="stat-value" id="statMinBalance">₹0</div>
+                    <div class="stat-sub">Reserved</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">📐 Price Range</div>
+                    <div class="stat-value" id="statPriceRange" style="font-size:12px">-</div>
+                    <div class="stat-sub">Min - Max</div>
+                </div>
+            </div>
+
+            <!-- Strategy Selection -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">🎯 Strategy</div>
+                    <span class="strategy-badge badge-winrate" id="activeStrategyBadge">--</span>
+                </div>
+                <div class="strategy-list" id="strategyList">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+
+            <!-- Bot Activity Log -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">📋 Bot Activity</div>
+                    <button class="btn btn-sm btn-secondary" onclick="Dashboard.clearLogs()">Clear</button>
+                </div>
+                <div class="log-container" id="logContainer">
+                    <div class="empty-state">
+                        <div class="icon">📋</div>
+                        <div class="title">No Activity Yet</div>
+                        <div class="desc">Start the bot to see live activity logs</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== MARKET PAGE ===== -->
+        <div class="page" id="page-market" style="display:none">
+            <div class="market-sticky-header">
+                <div class="search-box">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="marketSearch" placeholder="Search crypto..." oninput="Market.search(this.value)">
+                </div>
+
+                <div class="market-tabs" id="marketTabs">
+                    <button class="market-tab active" data-filter="all" onclick="Market.setFilter('all', this)">All</button>
+                    <button class="market-tab" data-filter="trending" onclick="Market.setFilter('trending', this)">🔥 Trending</button>
+                    <button class="market-tab" data-filter="gainers" onclick="Market.setFilter('gainers', this)">📈 Top Gainers</button>
+                    <button class="market-tab" data-filter="losers" onclick="Market.setFilter('losers', this)">📉 Top Losers</button>
+                    <button class="market-tab" data-filter="volume" onclick="Market.setFilter('volume', this)">📊 Active (Vol)</button>
+                    <button class="market-tab" data-filter="value" onclick="Market.setFilter('value', this)">💰 Active (Val)</button>
+                    <button class="market-tab" data-filter="52high" onclick="Market.setFilter('52high', this)">🔝 52W High</button>
+                    <button class="market-tab" data-filter="52low" onclick="Market.setFilter('52low', this)">🔻 52W Low</button>
+                </div>
+            </div>
+
+            <div class="market-list" id="marketList">
+                <div class="empty-state">
+                    <div class="icon">📊</div>
+                    <div class="title">Loading Market Data...</div>
+                    <div class="desc">Connect your API to see live prices</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== TRADES PAGE ===== -->
+        <div class="page" id="page-trades">
+            <div class="trades-summary" id="tradesSummary">
+                <div class="trade-stat">
+                    <div class="label">Total</div>
+                    <div class="value" id="tradeTotal">0</div>
+                </div>
+                <div class="trade-stat">
+                    <div class="label">Win</div>
+                    <div class="value text-green" id="tradeWins">0</div>
+                </div>
+                <div class="trade-stat">
+                    <div class="label">Loss</div>
+                    <div class="value text-red" id="tradeLosses">0</div>
+                </div>
+                <div class="trade-stat">
+                    <div class="label">P&L</div>
+                    <div class="value" id="tradePnl">₹0</div>
+                </div>
+            </div>
+
+            <div class="trade-history">
+                <div class="trade-history-header">
+                    <span class="trade-history-title">📜 Trade History</span>
+                    <button class="btn-clear" id="btnClearHistory" onclick="Trades.clearHistory()">🗑 Clear History</button>
+                </div>
+                <div class="trade-list" id="tradeList">
+                    <div class="empty-state">
+                        <div class="icon">📊</div>
+                        <div class="title">No Trades Yet</div>
+                        <div class="desc">Bot will record all trades here</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== SETTINGS PAGE ===== -->
+        <div class="page" id="page-settings">
+
+            <!-- API Configuration -->
+            <div class="card settings-section">
+                <div class="settings-section-title">🔑 API Configuration</div>
+                
+                <div class="setting-row">
+                    <span class="setting-label">
+                        API Key
+                        <span class="sub">Delta Exchange India API Key</span>
+                    </span>
+                    <input type="text" class="input-field password" id="settingApiKey" placeholder="Enter API Key" autocomplete="off">
+                </div>
+                
+                <div class="setting-row">
+                    <span class="setting-label">
+                        API Secret
+                        <span class="sub">Delta Exchange India API Secret</span>
+                    </span>
+                    <input type="text" class="input-field password" id="settingApiSecret" placeholder="Enter API Secret" autocomplete="off">
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">API Status</span>
+                    <div class="setting-value">
+                        <span class="api-status disconnected" id="settingApiStatus">
+                            <span class="dot" style="width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block"></span>
+                            Not Connected
+                        </span>
+                    </div>
+                </div>
+
+                <div style="margin-top:10px; display:flex; gap:8px;">
+                    <button class="btn btn-primary btn-sm" onclick="Settings.saveApi()">💾 Save Keys</button>
+                    <button class="btn btn-secondary btn-sm" onclick="Settings.testConnection()">🔌 Test Connection</button>
+                </div>
+            </div>
+
+            <!-- Trading Configuration -->
+            <div class="card settings-section">
+                <div class="settings-section-title">⚙️ Trading Configuration</div>
+
+                <div class="setting-row">
+                    <span class="setting-label">Trading Currency</span>
+                    <select class="select-field" id="settingCurrency" onchange="Settings.fetchBalance(this.value)">
+                        <option value="INR">🇮🇳 INR</option>
+                        <option value="USD">🇺🇸 USD</option>
+                        <option value="USDT">💲 USDT</option>
+                        <option value="BTC">₿ BTC</option>
+                    </select>
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Budget to Use
+                        <span class="sub">% of available balance for trading</span>
+                    </span>
+                    <div class="range-container">
+                        <input type="range" class="range-slider" id="settingBudget" min="5" max="100" step="5" value="50" oninput="Settings.updateBudget(this.value)">
+                        <span class="range-value" id="budgetValue">50%</span>
+                    </div>
+                </div>
+
+                <div class="budget-display" id="budgetDisplay">
+                    <div class="budget-row">
+                        <span class="label">Delta Balance</span>
+                        <span class="value" id="budgetTotalBalance">$0</span>
+                    </div>
+                    <div class="budget-row">
+                        <span class="label">Trading Budget</span>
+                        <span class="value text-primary" id="budgetTradingAmount">$0</span>
+                    </div>
+                    <div class="budget-row">
+                        <span class="label">Min Balance Reserved</span>
+                        <span class="value" id="budgetMinReserved">$0</span>
+                    </div>
+                    <div class="budget-row">
+                        <span class="label">Effective Trading</span>
+                        <span class="value text-green" id="budgetEffective">$0</span>
+                    </div>
+                    <div class="budget-bar">
+                        <div class="budget-bar-fill" id="budgetBarFill" style="width:50%"></div>
+                    </div>
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Minimum Balance
+                        <span class="sub">Bot stops trading below this amount</span>
+                    </span>
+                    <input type="text" inputmode="decimal" class="input-field" id="settingMinBalance" value="200" oninput="Settings.updateBudgetDisplay()">
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Min Crypto Price
+                        <span class="sub">Skip cryptos below this price</span>
+                    </span>
+                    <input type="text" inputmode="decimal" class="input-field" id="settingMinPrice" value="0">
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Max Crypto Price
+                        <span class="sub">Skip cryptos above this price</span>
+                    </span>
+                    <input type="text" inputmode="decimal" class="input-field" id="settingMaxPrice" value="9999999">
+                </div>
+            </div>
+
+            <!-- Risk Management -->
+            <div class="card settings-section">
+                <div class="settings-section-title">🛡️ Risk Management</div>
+
+                <div class="setting-row">
+                    <span class="setting-label">Stop Loss %</span>
+                    <input type="text" inputmode="decimal" class="input-field" id="settingStopLoss" value="2">
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Profit % per Trade
+                        <span class="sub">Auto-close at this profit</span>
+                    </span>
+                    <input type="text" inputmode="decimal" class="input-field" id="settingProfit" value="3">
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">Max Daily Trades</span>
+                    <input type="text" inputmode="numeric" class="input-field" id="settingMaxDailyTrades" value="50">
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">Max Daily Loss</span>
+                    <input type="text" inputmode="decimal" class="input-field" id="settingMaxDailyLoss" value="500">
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Max Open Positions
+                        <span class="sub">No new orders beyond this</span>
+                    </span>
+                    <input type="text" inputmode="numeric" class="input-field" id="settingMaxPositions" value="5">
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">Trade Quantity</span>
+                    <select class="select-field" id="settingQtyMode" onchange="Settings.toggleQtyMode(this.value)">
+                        <option value="auto">Auto</option>
+                        <option value="manual">Manual</option>
+                    </select>
+                </div>
+
+                <div class="setting-row hidden" id="manualQtyRow">
+                    <span class="setting-label">
+                        Manual Quantity
+                        <span class="sub">Contracts per trade</span>
+                    </span>
+                    <input type="text" inputmode="numeric" class="input-field" id="settingManualQty" value="1">
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">Leverage</span>
+                    <div class="range-container">
+                        <input type="range" class="range-slider" id="settingLeverage" min="1" max="100" value="1" oninput="Settings.updateLeverage(this.value)">
+                        <span class="range-value" id="leverageValue">1x</span>
+                    </div>
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Cooldown Period
+                        <span class="sub">Minutes before re-trading same crypto</span>
+                    </span>
+                    <input type="text" inputmode="numeric" class="input-field" id="settingCooldown" value="5">
+                </div>
+            </div>
+
+            <!-- SAVE ALL BUTTON -->
+            <div style="padding: 0 0 16px;">
+                <button class="btn btn-primary" style="width:100%; padding:14px; font-size:16px; font-weight:700; border-radius:12px;" onclick="Settings.saveAllSettings()">💾 SAVE ALL SETTINGS</button>
+            </div>
+
+            <!-- Bot Information -->
+            <div class="card settings-section">
+                <div class="settings-section-title">ℹ️ Bot Information</div>
+
+                <div class="info-row">
+                    <span class="info-label">Bot Version</span>
+                    <span class="info-value" id="infoBotVersion">v1.0.0</span>
+                </div>
+
+                <div class="info-row">
+                    <span class="info-label">No. of Strategies</span>
+                    <span class="info-value" id="infoStrategyCount">7</span>
+                </div>
+
+                <div class="info-row">
+                    <span class="info-label">API Status</span>
+                    <span class="api-status disconnected" id="infoApiStatus">
+                        <span class="dot" style="width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block"></span>
+                        Not Connected
+                    </span>
+                </div>
+
+                <div class="info-row">
+                    <span class="info-label">IPv6</span>
+                    <div class="ipv6-container">
+                        <span class="ipv6-address" id="infoIpv6">Loading...</span>
+                        <button class="btn-copy" id="btnCopyIpv6" onclick="Settings.copyIpv6()">📋 Copy</button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- ========== BOTTOM NAVIGATION ========== -->
+    <nav class="bottom-nav" id="bottomNav">
+        <button class="nav-item active" data-page="dashboard" onclick="App.navigate('dashboard')">
+            <span class="nav-icon">🏠</span>
+            <span class="nav-label">Home</span>
+        </button>
+        <button class="nav-item" data-page="market" onclick="App.navigate('market')">
+            <span class="nav-icon">📈</span>
+            <span class="nav-label">Market</span>
+        </button>
+        <button class="nav-item" data-page="trades" onclick="App.navigate('trades')">
+            <span class="nav-icon">📊</span>
+            <span class="nav-label">Trades</span>
+        </button>
+        <button class="nav-item" data-page="settings" onclick="App.navigate('settings')">
+            <span class="nav-icon">⚙️</span>
+            <span class="nav-label">Settings</span>
+        </button>
+    </nav>
+
+</div>
+
+<!-- Socket.IO -->
+<script src="/socket.io/socket.io.js"></script>
+
+<!-- App Scripts -->
+<script src="js/websocket.js"></script>
+<script src="js/dashboard.js"></script>
+<script src="js/market.js"></script>
+<script src="js/trades.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+</html>

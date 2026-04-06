@@ -1,0 +1,380 @@
+/**
+ * Core Bot Trading Engine
+ * Handles market scanning, strategy execution, order placement, and lifecycle
+ */
+const deltaApi = require('./delta-api');
+const strategyManager = require('./strategies');
+const riskManager = require('./risk-manager');
+const signalValidator = require('./signal-validator');
+const db = require('../database');
+
+class BotEngine {
+    constructor() {
+        this.running = false;
+        this.scanTimer = null;
+        this.io = null;
+        this.products = [];
+        this.scanInterval = 5000;
+        this.tradeableProducts = [];
+        this.scanCount = 0;
+        this.tradesPlacedThisScan = 0;
+    }
+
+    setIO(io) {
+        this.io = io;
+    }
+
+    log(level, message, data = null) {
+        const entry = { level, message, data, timestamp: new Date().toISOString() };
+        db.addLog(level, message, data);
+        if (this.io) this.io.emit('bot:log', entry);
+        const icons = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌', trade: '💰', signal: '📊' };
+        console.log(`${icons[level] || '📋'} [${level.toUpperCase()}] ${message}`);
+    }
+
+    emitStatus() {
+        if (this.io) {
+            this.io.emit('bot:status', {
+                running: this.running,
+                activeStrategy: strategyManager.getActiveStrategy()?.getInfo(),
+                timestamp: new Date().toISOString()
+            });
+        }
+    }
+
+    // Emit dashboard refresh so trades/stats update in real-time
+    emitDashboardRefresh() {
+        if (this.io) this.io.emit('bot:refresh', { timestamp: new Date().toISOString() });
+    }
+
+    async initialize() {
+        try {
+            const apiKey = db.getEncryptedSetting('api_key');
+            const apiSecret = db.getEncryptedSetting('api_secret');
+            if (!apiKey || !apiSecret) {
+                this.log('warning', 'API credentials not configured. Go to Settings to add them.');
+                return false;
+            }
+            deltaApi.setCredentials(apiKey, apiSecret);
+
+            const savedStrategy = db.getSetting('active_strategy', 'multi-ai');
+            try { strategyManager.setActiveStrategy(savedStrategy); } 
+            catch (e) { strategyManager.setActiveStrategy('multi-ai'); }
+
+            const test = await deltaApi.testConnection();
+            if (!test.connected) {
+                this.log('error', `Delta Exchange connection failed: ${test.error}`);
+                return false;
+            }
+            this.log('success', 'Connected to Delta Exchange India');
+            await this.loadProducts();
+            return true;
+        } catch (error) {
+            this.log('error', `Initialization failed: ${error.message}`);
+            return false;
+        }
+    }
+
+    async loadProducts() {
+        try {
+            this.products = await deltaApi.getProducts();
+            this.tradeableProducts = this.products.filter(p =>
+                p.contract_type === 'perpetual_futures' && p.state === 'live' && p.is_quanto === false
+            );
+            this.log('info', `📋 Loaded ${this.tradeableProducts.length} tradeable cryptos`);
+        } catch (error) {
+            this.log('error', `Failed to load products: ${error.message}`);
+        }
+    }
+
+    async start() {
+        if (this.running) { this.log('warning', 'Bot is already running'); return; }
+        this.log('info', '🚀 Starting CryptoBOT...');
+        const initialized = await this.initialize();
+        if (!initialized) { this.log('error', 'Failed to initialize. Check settings and try again.'); return; }
+        this.running = true;
+        this.scanCount = 0;
+        this.emitStatus();
+        const strategy = strategyManager.getActiveStrategy();
+        this.log('success', `✅ Bot started | Strategy: ${strategy.name} (${strategy.getInfo().winRate}% win) | Scanning all cryptos...`);
+        this.scanLoop();
+    }
+
+    stop() {
+        if (!this.running) { this.log('warning', 'Bot is not running'); return; }
+        this.running = false;
+        if (this.scanTimer) { clearTimeout(this.scanTimer); this.scanTimer = null; }
+        this.emitStatus();
+        this.log('info', `🛑 Bot stopped | Total scans: ${this.scanCount}`);
+    }
+
+    async scanLoop() {
+        if (!this.running) return;
+        try { await this.scan(); } 
+        catch (error) { this.log('error', `Scan error: ${error.message}`); }
+        const interval = parseInt(db.getSetting('scan_interval', this.scanInterval));
+        this.scanTimer = setTimeout(() => this.scanLoop(), interval);
+    }
+
+    async scan() {
+        this.scanCount++;
+        this.tradesPlacedThisScan = 0;
+        const settings = riskManager.getSettings();
+        const sym = settings.currency === 'INR' ? '₹' : (settings.currency === 'BTC' ? '₿' : '$');
+
+        // Get current balance
+        let balance;
+        try { balance = await deltaApi.getBalance(settings.currency); } 
+        catch (error) { this.log('error', `Failed to get balance: ${error.message}`); return; }
+        if (this.io) this.io.emit('bot:balance', balance);
+
+        // Get tickers
+        let tickers;
+        try { tickers = await deltaApi.getTickers(); } 
+        catch (error) { this.log('error', `Failed to get tickers: ${error.message}`); return; }
+        if (!tickers || tickers.length === 0) { this.log('warning', '⚠️ No tickers received'); return; }
+
+        // Filter by price range
+        const filteredTickers = tickers.filter(t => {
+            const price = parseFloat(t.mark_price || t.close || 0);
+            return price >= settings.minPrice && price <= settings.maxPrice && price > 0;
+        });
+        const priceFilteredOut = tickers.length - filteredTickers.length;
+
+        // === SCAN START LOG ===
+        this.log('info', `🔍 Scan #${this.scanCount} | Balance: ${sym}${(balance.balance || 0).toFixed(2)} | Cryptos: ${filteredTickers.length} (${priceFilteredOut} out of range) | Strategy: ${strategyManager.getActiveStrategy().name}`);
+
+        // Track scan stats
+        let stats = { analyzed: 0, riskBlocked: 0, noData: 0, noSignal: 0, signalsFound: 0, fakeRejected: 0, tradesPlaced: 0 };
+
+        // === CHECK GLOBAL LIMITS FIRST ===
+        const globalCheck = this.checkGlobalLimits(settings, balance, sym);
+        if (!globalCheck.allowed) {
+            this.log('warning', globalCheck.reason);
+            return;
+        }
+
+        // Analyze ALL tickers
+        for (const ticker of filteredTickers) {
+            if (!this.running) break;
+            try { await this.analyzeTicker(ticker, balance, stats, settings); } 
+            catch (error) { /* skip individual errors */ }
+            await this.sleep(300);
+        }
+
+        // === SCAN SUMMARY ===
+        const parts = [`Analyzed: ${stats.analyzed}`];
+        if (stats.riskBlocked > 0) parts.push(`Risk blocked: ${stats.riskBlocked}`);
+        if (stats.noData > 0) parts.push(`No data: ${stats.noData}`);
+        if (stats.noSignal > 0) parts.push(`No signal: ${stats.noSignal}`);
+        if (stats.signalsFound > 0) parts.push(`Signals: ${stats.signalsFound}`);
+        if (stats.fakeRejected > 0) parts.push(`🚫 Fake rejected: ${stats.fakeRejected}`);
+        if (stats.tradesPlaced > 0) parts.push(`✅ Trades: ${stats.tradesPlaced}`);
+        this.log('info', `📊 Scan #${this.scanCount} done | ${parts.join(' | ')}`);
+
+        // Check existing open positions for closure
+        await this.checkOpenPositions();
+    }
+
+    checkGlobalLimits(settings, balance, sym) {
+        const dailyStats = db.getTodayStats();
+        const openTrades = db.getOpenTrades();
+
+        if (balance.available <= settings.minBalance) {
+            return { allowed: false, reason: `💰 Balance exhausted: ${sym}${balance.available.toFixed(2)} ≤ min ${sym}${settings.minBalance} — Pausing trades` };
+        }
+        if (dailyStats.total_trades >= settings.maxDailyTrades) {
+            return { allowed: false, reason: `📊 Daily trade limit: ${dailyStats.total_trades}/${settings.maxDailyTrades} — Pausing` };
+        }
+        if (Math.abs(dailyStats.total_loss) >= settings.maxDailyLoss) {
+            return { allowed: false, reason: `🔴 Daily loss limit: ${sym}${Math.abs(dailyStats.total_loss).toFixed(2)} ≥ ${sym}${settings.maxDailyLoss} — Pausing` };
+        }
+        if (openTrades.length >= settings.maxOpenPositions) {
+            return { allowed: false, reason: `📈 Max open positions: ${openTrades.length}/${settings.maxOpenPositions} — Pausing new orders` };
+        }
+        return { allowed: true };
+    }
+
+    async analyzeTicker(ticker, balance, stats, settings) {
+        const symbol = ticker.symbol;
+        const price = parseFloat(ticker.mark_price || ticker.close || 0);
+        if (price <= 0) return;
+        stats.analyzed++;
+
+        // === RE-CHECK OPEN POSITIONS LIMIT (may change during scan) ===
+        const currentOpen = db.getOpenTrades();
+        if (currentOpen.length >= settings.maxOpenPositions) {
+            stats.riskBlocked++;
+            return; // Don't spam — already logged at global level
+        }
+
+        // Check all risk rules
+        const riskCheck = riskManager.canTrade({
+            symbol, price, availableBalance: balance.available, side: 'buy'
+        });
+
+        if (!riskCheck.allowed) {
+            stats.riskBlocked++;
+            if (!riskCheck.reason.includes('Cooldown')) {
+                this.log('warning', `⛔ ${symbol} @ ${price}: ${riskCheck.reason}`);
+            }
+            return;
+        }
+
+        // Get candle data
+        let candles;
+        try {
+            const end = Math.floor(Date.now() / 1000);
+            const start = end - (60 * 60 * 4);
+            candles = await deltaApi.getCandles(symbol, '5m', start, end);
+        } catch (error) { stats.noData++; return; }
+        if (!candles || candles.length < 30) { stats.noData++; return; }
+
+        // Prepare market data
+        const marketData = {
+            symbol,
+            closes: candles.map(c => parseFloat(c.close)),
+            opens: candles.map(c => parseFloat(c.open)),
+            highs: candles.map(c => parseFloat(c.high)),
+            lows: candles.map(c => parseFloat(c.low)),
+            volumes: candles.map(c => parseFloat(c.volume)),
+            bid: parseFloat(ticker.bid || 0),
+            ask: parseFloat(ticker.ask || 0),
+            currentPrice: price
+        };
+
+        // Run strategy
+        const signal = strategyManager.analyze(marketData);
+        if (signal.signal === 'none') { stats.noSignal++; return; }
+
+        stats.signalsFound++;
+        const strategyName = signal.strategy || strategyManager.getActiveStrategy().name;
+
+        this.log('signal', `🔔 ${signal.signal.toUpperCase()} ${symbol} @ ${price} | ${strategyName} | ${signal.confidence}% | ${signal.reason}`);
+
+        // === MULTI-LAYER FAKE SIGNAL DETECTION ===
+        const validation = signalValidator.validate(signal, marketData);
+        if (!validation.valid) {
+            stats.fakeRejected++;
+            this.log('warning', `🚫 FAKE SIGNAL: ${symbol} | Score: ${validation.confidence}%/${signalValidator.minConfidence}% | ${validation.passedCount}/${validation.totalChecks} checks | Failed: ${validation.reasons.join(' | ')}`);
+            return;
+        }
+
+        this.log('success', `✅ VALID: ${symbol} | Score: ${validation.confidence}% | ${validation.passedCount}/${validation.totalChecks} checks passed`);
+
+        // === FINAL PRE-TRADE SAFETY CHECK ===
+        const finalOpen = db.getOpenTrades();
+        if (finalOpen.length >= settings.maxOpenPositions) {
+            this.log('warning', `⛔ ${symbol}: Max positions reached just before order (${finalOpen.length}/${settings.maxOpenPositions})`);
+            return;
+        }
+
+        const traded = await this.executeTrade(symbol, signal, price, balance, ticker, strategyName);
+        if (traded) stats.tradesPlaced++;
+    }
+
+    async executeTrade(symbol, signal, price, balance, ticker, strategyName) {
+        const settings = riskManager.getSettings();
+        const sym = settings.currency === 'INR' ? '₹' : (settings.currency === 'BTC' ? '₿' : '$');
+
+        const product = this.products.find(p => p.symbol === symbol);
+        if (!product) { this.log('warning', `Product not found: ${symbol}`); return false; }
+
+        const quantity = riskManager.calculateQuantity(price, balance.available);
+        if (quantity <= 0) {
+            this.log('warning', `Qty=0 for ${symbol} (price: ${price}, balance: ${sym}${balance.available.toFixed(2)})`);
+            return false;
+        }
+
+        const exits = riskManager.calculateExitPrices(price, signal.side);
+
+        // Set leverage
+        try {
+            if (settings.leverage > 1) await deltaApi.setLeverage(product.id, settings.leverage);
+        } catch (error) { this.log('warning', `Leverage error ${symbol}: ${error.message}`); }
+
+        // Place bracket order with TP + SL
+        try {
+            this.log('trade', `📝 ORDER: ${signal.side.toUpperCase()} ${symbol} | Qty: ${quantity} | ~${price} | TP: ${exits.takeProfit} (+${settings.profitPercent}%) | SL: ${exits.stopLoss} (-${settings.stopLossPercent}%) | By: ${strategyName} | WHY: ${signal.reason}`);
+
+            const order = await deltaApi.placeBracketOrder({
+                product_id: product.id,
+                size: quantity,
+                side: signal.side,
+                order_type: 'market_order',
+                take_profit_price: exits.takeProfit,
+                stop_loss_price: exits.stopLoss
+            });
+
+            // Record trade in DB
+            db.addTrade({
+                trade_id: order.id || `T${Date.now()}`,
+                symbol, side: signal.side, order_type: 'market',
+                price, quantity, strategy: strategyName, status: 'open',
+                notes: JSON.stringify({
+                    confidence: signal.confidence,
+                    takeProfit: exits.takeProfit,
+                    stopLoss: exits.stopLoss,
+                    reason: signal.reason,
+                    strategy: strategyName
+                })
+            });
+
+            // Update daily stats (trade count)
+            db.updateDailyTradeCount();
+
+            riskManager.setCooldown(symbol);
+
+            this.log('success', `🎯 FILLED: ${signal.side.toUpperCase()} ${quantity}x ${symbol} @ ~${price} | TP: ${exits.takeProfit} | SL: ${exits.stopLoss} | ${strategyName} — ${signal.reason}`);
+
+            // Emit trade + refresh events
+            if (this.io) {
+                this.io.emit('bot:trade', {
+                    symbol, side: signal.side, quantity, price,
+                    takeProfit: exits.takeProfit, stopLoss: exits.stopLoss,
+                    strategy: strategyName, reason: signal.reason,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            this.emitDashboardRefresh();
+            return true;
+        } catch (error) {
+            this.log('error', `❌ Order FAILED ${symbol}: ${error.message}`);
+            return false;
+        }
+    }
+
+    async checkOpenPositions() {
+        try {
+            const positions = await deltaApi.getPositions();
+            const openTrades = db.getOpenTrades();
+
+            for (const trade of openTrades) {
+                const position = positions.find(p => p.symbol === trade.symbol);
+                if (!position || parseFloat(position.size) === 0) {
+                    const pnl = position ? parseFloat(position.realized_pnl || 0) : 0;
+                    db.closeTrade(trade.id, trade.price, pnl);
+                    db.updateDailyStats(pnl > 0, pnl);
+
+                    const icon = pnl > 0 ? '🟢' : '🔴';
+                    this.log('trade', `${icon} CLOSED: ${trade.symbol} | P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} | ${trade.strategy}`);
+                    this.emitDashboardRefresh();
+                }
+            }
+        } catch (error) { /* silent */ }
+    }
+
+    sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+    getStatus() {
+        return {
+            running: this.running,
+            activeStrategy: strategyManager.getActiveStrategy()?.getInfo(),
+            productsLoaded: this.tradeableProducts.length,
+            openTrades: db.getOpenTrades().length,
+            scanCount: this.scanCount
+        };
+    }
+}
+
+module.exports = new BotEngine();
