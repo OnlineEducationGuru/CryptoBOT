@@ -1,9 +1,11 @@
 /**
- * Settings Module - Settings page logic
+ * Settings Module - Settings page logic with live exchange rate
+ * Fixed: Shows actual Delta wallet balance (available_balance), not equity
  */
 const Settings = {
     settings: {},
     balanceData: null,
+    exchangeRates: { USD_INR: 94 },
 
     async init() {
         await this.loadSettings();
@@ -14,6 +16,9 @@ const Settings = {
         try {
             const res = await fetch('/api/settings');
             this.settings = await res.json();
+            if (this.settings.exchangeRates) {
+                this.exchangeRates = this.settings.exchangeRates;
+            }
             this.populateFields();
         } catch (error) {
             console.error('Failed to load settings:', error);
@@ -22,7 +27,6 @@ const Settings = {
 
     async fetchBalance(currency) {
         try {
-            // Save currency first if provided
             if (currency) {
                 await fetch('/api/settings', {
                     method: 'POST',
@@ -33,6 +37,9 @@ const Settings = {
             const cur = currency || document.getElementById('settingCurrency')?.value || 'INR';
             const res = await fetch(`/api/balance?currency=${cur}`);
             this.balanceData = await res.json();
+            if (this.balanceData.exchangeRates) {
+                this.exchangeRates = this.balanceData.exchangeRates;
+            }
             this.updateBudgetDisplay();
         } catch (error) {
             console.error('Failed to fetch balance:', error);
@@ -43,7 +50,6 @@ const Settings = {
         const currency = document.getElementById('settingCurrency')?.value || 'INR';
         const sym = currency === 'INR' ? '₹' : (currency === 'BTC' ? '₿' : '$');
 
-        // If no balance data yet, show loading
         if (!this.balanceData || this.balanceData.balance === undefined) {
             document.getElementById('budgetTotalBalance').textContent = `${sym}--`;
             document.getElementById('budgetTradingAmount').textContent = `${sym}--`;
@@ -52,34 +58,61 @@ const Settings = {
             return;
         }
 
-        const totalBalance = this.balanceData.balance || 0;
+        // === USE walletBalance (available_balance) — the ACTUAL Delta app wallet balance ===
+        const walletBalance = this.balanceData.walletBalance || this.balanceData.available || 0;
+        const equity = this.balanceData.equity || this.balanceData.balance || walletBalance;
+        const marginUsed = this.balanceData.marginUsed || this.balanceData.locked || 0;
+        const unrealizedPnl = this.balanceData.unrealizedPnl || 0;
         const budgetPercent = parseFloat(document.getElementById('settingBudget')?.value || 50);
         const minBalance = parseFloat(document.getElementById('settingMinBalance')?.value || 0);
 
-        const tradingBudget = (totalBalance * budgetPercent) / 100;
+        const tradingBudget = (walletBalance * budgetPercent) / 100;
         const effective = Math.max(0, tradingBudget - minBalance);
 
-        // Show actual asset symbol returned by API
-        const displaySym = this.balanceData.assetSymbol 
+        const displaySym = this.balanceData.assetSymbol
             ? (this.balanceData.assetSymbol === 'INR' ? '₹' : (this.balanceData.assetSymbol === 'BTC' ? '₿' : '$'))
             : sym;
+        const assetName = this.balanceData.assetSymbol || currency;
+        const rate = this.exchangeRates.USD_INR || 94;
 
-        document.getElementById('budgetTotalBalance').textContent = `${displaySym}${totalBalance.toFixed(2)}`;
+        // Show wallet balance (available_balance) with INR equivalent
+        let balanceText = `${displaySym}${walletBalance.toFixed(2)}`;
+        if (assetName === 'USD' || assetName === 'USDT' || assetName === 'USDC') {
+            balanceText += ` (₹${(walletBalance * rate).toFixed(0)})`;
+        }
+
+        // Show equity separately if different from wallet balance
+        if (equity > 0 && Math.abs(equity - walletBalance) > 0.01) {
+            balanceText += ` | Equity: ${displaySym}${equity.toFixed(2)}`;
+        }
+
+        document.getElementById('budgetTotalBalance').textContent = balanceText;
+
+        // Show margin/locked info if available
+        const marginEl = document.getElementById('budgetMarginUsed');
+        if (marginEl) {
+            marginEl.textContent = `${displaySym}${marginUsed.toFixed(2)}`;
+        }
+        const unrealizedEl = document.getElementById('budgetUnrealizedPnl');
+        if (unrealizedEl) {
+            unrealizedEl.textContent = `${unrealizedPnl >= 0 ? '+' : ''}${displaySym}${unrealizedPnl.toFixed(2)}`;
+            unrealizedEl.className = `value ${unrealizedPnl >= 0 ? 'text-green' : 'text-red'}`;
+        }
+
         document.getElementById('budgetTradingAmount').textContent = `${displaySym}${tradingBudget.toFixed(2)}`;
         document.getElementById('budgetMinReserved').textContent = `${displaySym}${minBalance.toFixed(2)}`;
         document.getElementById('budgetEffective').textContent = `${displaySym}${effective.toFixed(2)}`;
         document.getElementById('budgetBarFill').style.width = `${budgetPercent}%`;
 
-        // Show actual asset name if different
-        if (this.balanceData.assetSymbol && this.balanceData.assetSymbol !== currency) {
-            document.getElementById('budgetTotalBalance').textContent += ` (${this.balanceData.assetSymbol})`;
+        // Debug info in console
+        if (this.balanceData._raw) {
+            console.log('[Settings] Balance Debug:', this.balanceData._raw);
         }
     },
 
     populateFields() {
         const s = this.settings;
 
-        // API fields - don't populate passwords if masked
         if (s.api_key && s.api_key !== '••••••••' && s.api_key.length > 5) {
             document.getElementById('settingApiKey').value = s.api_key;
         }
@@ -87,10 +120,8 @@ const Settings = {
             document.getElementById('settingApiSecret').value = s.api_secret;
         }
 
-        // Update API status indicators
         this.updateApiStatus(s.apiConnected);
 
-        // Trading config
         if (s.currency) document.getElementById('settingCurrency').value = s.currency;
         if (s.budget_percent) {
             document.getElementById('settingBudget').value = s.budget_percent;
@@ -100,21 +131,18 @@ const Settings = {
         if (s.min_price !== undefined) document.getElementById('settingMinPrice').value = s.min_price;
         if (s.max_price !== undefined) document.getElementById('settingMaxPrice').value = s.max_price;
 
-        // Risk management
         if (s.stop_loss_percent) document.getElementById('settingStopLoss').value = s.stop_loss_percent;
         if (s.profit_percent) document.getElementById('settingProfit').value = s.profit_percent;
         if (s.max_daily_trades) document.getElementById('settingMaxDailyTrades').value = s.max_daily_trades;
         if (s.max_daily_loss) document.getElementById('settingMaxDailyLoss').value = s.max_daily_loss;
         if (s.max_open_positions) document.getElementById('settingMaxPositions').value = s.max_open_positions;
 
-        // Trade qty mode
         if (s.trade_qty_mode) {
             document.getElementById('settingQtyMode').value = s.trade_qty_mode;
             this.toggleQtyMode(s.trade_qty_mode, false);
         }
         if (s.manual_qty) document.getElementById('settingManualQty').value = s.manual_qty;
 
-        // Leverage
         if (s.leverage) {
             document.getElementById('settingLeverage').value = s.leverage;
             document.getElementById('leverageValue').textContent = s.leverage + 'x';
@@ -122,11 +150,15 @@ const Settings = {
 
         if (s.cooldown_minutes) document.getElementById('settingCooldown').value = s.cooldown_minutes;
 
-        // Bot info
-        document.getElementById('infoBotVersion').textContent = 'v' + (s.botVersion || '1.0.0');
-        document.getElementById('infoStrategyCount').textContent = s.strategyCount || 7;
+        document.getElementById('infoBotVersion').textContent = 'v' + (s.botVersion || '2.0.0');
+        document.getElementById('infoStrategyCount').textContent = s.strategyCount || 15;
 
-        // IPv6
+        // Exchange rate display
+        const rateEl = document.getElementById('infoExchangeRate');
+        if (rateEl && s.exchangeRates) {
+            rateEl.textContent = `$1 = ₹${s.exchangeRates.USD_INR?.toFixed(2) || '94.00'}`;
+        }
+
         document.getElementById('infoIpv6').textContent = s.ipv6 || 'Not available';
     },
 
@@ -164,8 +196,6 @@ const Settings = {
                 body: JSON.stringify({ api_key: apiKey, api_secret: apiSecret })
             });
             App.showToast('API credentials saved (encrypted)', 'success');
-            
-            // Test connection
             await this.testConnection();
         } catch (error) {
             App.showToast('Failed to save API credentials', 'error');
@@ -190,7 +220,6 @@ const Settings = {
             cooldown_minutes: document.getElementById('settingCooldown').value
         };
 
-        // Also save API keys if filled
         const apiKey = document.getElementById('settingApiKey').value.trim();
         const apiSecret = document.getElementById('settingApiSecret').value.trim();
         if (apiKey) settings.api_key = apiKey;
@@ -205,7 +234,6 @@ const Settings = {
             const result = await res.json();
             if (result.success) {
                 App.showToast(`✅ All settings saved (${result.saved} items)`, 'success');
-                // Refresh balance display
                 await this.fetchBalance();
             }
         } catch (error) {
@@ -222,7 +250,6 @@ const Settings = {
             if (result.connected) {
                 this.updateApiStatus(true);
                 App.showToast('✅ Connected to Delta Exchange!', 'success');
-                // Refresh balance
                 await this.fetchBalance();
             } else {
                 this.updateApiStatus(false);
@@ -270,7 +297,6 @@ const Settings = {
                 btn.classList.remove('copied');
             }, 2000);
         } catch (error) {
-            // Fallback
             const input = document.createElement('input');
             input.value = ipv6;
             document.body.appendChild(input);

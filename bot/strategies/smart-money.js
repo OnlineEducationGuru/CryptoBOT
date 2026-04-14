@@ -59,12 +59,19 @@ class SmartMoneyStrategy {
             reasons.push(volConf.reason);
         }
 
+        // 5. Fair Value Gap (FVG) detection
+        const fvg = this.detectFVG(highs, lows, closes, opens);
+        if (fvg) {
+            score += fvg.score;
+            reasons.push(fvg.reason);
+        }
+
         // Determine signal
         if (score >= 50 && reasons.length >= 2) {
             const side = this.determineSide(orderBlock, sweep, choch, closes);
             if (side) {
                 return {
-                    signal: side, side, confidence: Math.min(92, score),
+                    signal: side, side: side, confidence: Math.min(92, score),
                     reason: `SMC: ${reasons.join(' + ')}`,
                     strategy: this.name
                 };
@@ -159,6 +166,32 @@ class SmartMoneyStrategy {
             return { confirmed: true, reason: `Volume spike ${(recent/avg).toFixed(1)}x` };
         }
         return { confirmed: false };
+    }
+
+    // Fair Value Gap: gap between candle 1 high and candle 3 low (bullish) or candle 1 low and candle 3 high (bearish)
+    detectFVG(highs, lows, closes, opens) {
+        const len = closes.length;
+        if (len < 5) return null;
+
+        // Check last few candle sets for FVG
+        for (let i = len - 3; i >= len - 8 && i >= 2; i--) {
+            // Bullish FVG: candle3.low > candle1.high (gap up)
+            if (lows[i + 2] > highs[i]) {
+                const price = closes[len - 1];
+                // Price returning to fill the FVG = buy opportunity
+                if (price <= lows[i + 2] && price >= highs[i]) {
+                    return { score: 15, reason: `Bullish FVG fill at ${price.toFixed(2)}`, side: 'buy' };
+                }
+            }
+            // Bearish FVG: candle3.high < candle1.low (gap down)
+            if (highs[i + 2] < lows[i]) {
+                const price = closes[len - 1];
+                if (price >= highs[i + 2] && price <= lows[i]) {
+                    return { score: 15, reason: `Bearish FVG fill at ${price.toFixed(2)}`, side: 'sell' };
+                }
+            }
+        }
+        return null;
     }
 
     determineSide(orderBlock, sweep, choch, closes) {

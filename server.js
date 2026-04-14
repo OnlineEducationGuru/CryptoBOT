@@ -13,23 +13,21 @@ const deltaApi = require('./bot/delta-api');
 const strategyManager = require('./bot/strategies');
 const riskManager = require('./bot/risk-manager');
 
-// Cache public IPv6 so we don't fetch it every request
+// Cache public IPv6
 let cachedPublicIpv6 = null;
 let ipv6LastFetch = 0;
 
 async function getPublicIPv6() {
-    // Cache for 5 minutes
     if (cachedPublicIpv6 && (Date.now() - ipv6LastFetch) < 300000) {
         return cachedPublicIpv6;
     }
-    
-    // Try multiple services to get the real public IPv6
+
     const services = [
         'https://api6.ipify.org?format=text',
         'https://v6.ident.me',
         'https://ipv6.icanhazip.com'
     ];
-    
+
     for (const url of services) {
         try {
             const res = await axios.get(url, { timeout: 5000, family: 6 });
@@ -37,15 +35,11 @@ async function getPublicIPv6() {
             if (ip && ip.includes(':')) {
                 cachedPublicIpv6 = ip;
                 ipv6LastFetch = Date.now();
-                console.log(`[IPv6] Public address: ${ip} (from ${url})`);
                 return ip;
             }
-        } catch (e) {
-            // Try next service
-        }
+        } catch (e) { }
     }
-    
-    // Fallback: try local interfaces if external services fail
+
     const interfaces = os.networkInterfaces();
     for (const name of Object.keys(interfaces)) {
         for (const iface of interfaces[name]) {
@@ -54,7 +48,7 @@ async function getPublicIPv6() {
             }
         }
     }
-    
+
     return 'Not available';
 }
 
@@ -98,7 +92,7 @@ app.get('/api/dashboard', async (req, res) => {
         const settings = riskManager.getSettings();
         const openTrades = db.getOpenTrades();
 
-        let balance = { available: 0, balance: 0, locked: 0, unrealizedPnl: 0 };
+        let balance = { available: 0, balance: 0, walletBalance: 0, totalBalance: 0, marginUsed: 0, locked: 0, unrealizedPnl: 0 };
         try {
             const apiKey = db.getEncryptedSetting('api_key');
             const apiSecret = db.getEncryptedSetting('api_secret');
@@ -106,11 +100,13 @@ app.get('/api/dashboard', async (req, res) => {
                 deltaApi.setCredentials(apiKey, apiSecret);
                 balance = await deltaApi.getBalance(settings.currency);
             }
-        } catch (e) {
-            // Balance fetch failed silently
-        }
+        } catch (e) { }
 
-        const budgetInfo = riskManager.getBudgetInfo(balance.balance || balance.available);
+        // Fetch exchange rates
+        let exchangeRates = deltaApi.getExchangeRates();
+        try { exchangeRates = await deltaApi.fetchExchangeRate(); } catch (e) { }
+
+        const budgetInfo = riskManager.getBudgetInfo(balance.walletBalance || balance.available);
 
         res.json({
             balance,
@@ -118,6 +114,7 @@ app.get('/api/dashboard', async (req, res) => {
             dailyStats,
             budgetInfo,
             openTrades,
+            exchangeRates,
             settings: {
                 minBalance: settings.minBalance,
                 minPrice: settings.minPrice,
@@ -128,6 +125,16 @@ app.get('/api/dashboard', async (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
+    }
+});
+
+// --- Exchange Rate ---
+app.get('/api/exchange-rate', async (req, res) => {
+    try {
+        const rates = await deltaApi.fetchExchangeRate();
+        res.json(rates);
+    } catch (error) {
+        res.json({ USD_INR: 94 });
     }
 });
 
@@ -148,34 +155,40 @@ app.post('/api/strategies/select', (req, res) => {
     }
 });
 
-// --- Market Data ---
+// --- Market Data (PUBLIC - no auth needed) ---
 app.get('/api/market/tickers', async (req, res) => {
     try {
-        const apiKey = db.getEncryptedSetting('api_key');
-        const apiSecret = db.getEncryptedSetting('api_secret');
-        if (apiKey && apiSecret) deltaApi.setCredentials(apiKey, apiSecret);
-
+        // Tickers are PUBLIC — no API key needed
         const tickers = await deltaApi.getTickers();
-        const products = await deltaApi.getProducts();
+        let products = [];
+        try { products = await deltaApi.getProducts(); } catch (e) { }
 
-        // Enrich tickers with product info
         const enriched = tickers.map(t => {
             const product = products.find(p => p.symbol === t.symbol);
+            const price = parseFloat(t.mark_price || t.close || 0);
+            const open = parseFloat(t.open || 0);
+            const high = parseFloat(t.high || 0);
+            const low = parseFloat(t.low || 0);
+            const close = parseFloat(t.close || 0);
+
             return {
                 symbol: t.symbol,
-                price: parseFloat(t.mark_price || t.close || 0),
-                open: parseFloat(t.open || 0),
-                high: parseFloat(t.high || 0),
-                low: parseFloat(t.low || 0),
-                close: parseFloat(t.close || 0),
+                price,
+                open,
+                high,
+                low,
+                close,
                 volume: parseFloat(t.volume || 0),
                 turnover: parseFloat(t.turnover || 0),
-                change24h: t.close && t.open ? (((parseFloat(t.close) - parseFloat(t.open)) / parseFloat(t.open)) * 100) : 0,
+                change24h: open > 0 ? ((close - open) / open) * 100 : 0,
                 product_id: product?.id,
                 contract_type: product?.contract_type,
                 description: product?.description,
                 quoting_asset: product?.quoting_asset?.symbol,
-                settling_asset: product?.settling_asset?.symbol
+                settling_asset: product?.settling_asset?.symbol,
+                // For 52-week high/low approximation
+                nearHigh: high > 0 ? ((price / high) * 100).toFixed(1) : 0,
+                nearLow: low > 0 ? ((price / low) * 100).toFixed(1) : 0
             };
         }).filter(t => t.price > 0);
 
@@ -215,16 +228,19 @@ app.get('/api/settings', async (req, res) => {
     const settings = db.getAllSettings();
     const strategies = strategyManager.getAllStrategies();
 
-    // Get REAL public IPv6 address (not local interface)
     const ipv6 = await getPublicIPv6();
 
-    // API connection test
     const apiKey = db.getEncryptedSetting('api_key');
     const hasApi = !!apiKey;
+
+    // Get exchange rate
+    let exchangeRates = deltaApi.getExchangeRates();
+    try { exchangeRates = await deltaApi.fetchExchangeRate(); } catch (e) { }
 
     res.json({
         ...settings,
         ipv6,
+        exchangeRates,
         apiConnected: hasApi,
         botVersion: config.bot.version,
         strategyCount: strategies.length,
@@ -252,9 +268,7 @@ app.post('/api/settings/bulk', (req, res) => {
     for (const [key, value] of Object.entries(settings)) {
         if (value === undefined || value === null) continue;
         if (encryptedKeys.includes(key) && value !== '••••••••') {
-            // Trim whitespace/invisible chars from API keys
             const trimmed = value.toString().trim();
-            console.log(`[SAVE] ${key}: length=${trimmed.length}, first6=${trimmed.substring(0, 6)}...`);
             db.setEncryptedSetting(key, trimmed);
         } else if (!encryptedKeys.includes(key)) {
             db.setSetting(key, value.toString());
@@ -273,17 +287,10 @@ app.post('/api/settings/test-connection', async (req, res) => {
             return res.json({ connected: false, error: 'API credentials not configured. Please save your API Key and Secret first.' });
         }
 
-        console.log('\n========== CONNECTION TEST ==========');
-        console.log(`API Key decrypted: ${apiKey.substring(0, 8)}... (length: ${apiKey.length})`);
-        console.log(`API Secret decrypted: ${apiSecret.substring(0, 4)}... (length: ${apiSecret.length})`);
-        console.log(`Base URL: ${deltaApi.baseUrl}`);
-        console.log('=====================================\n');
-
         deltaApi.setCredentials(apiKey, apiSecret);
         const result = await deltaApi.testConnection();
         res.json(result);
     } catch (error) {
-        console.error('[TEST-CONNECTION ERROR]', error);
         res.json({ connected: false, error: error.message });
     }
 });
@@ -294,17 +301,20 @@ app.get('/api/balance', async (req, res) => {
         const apiKey = db.getEncryptedSetting('api_key');
         const apiSecret = db.getEncryptedSetting('api_secret');
         if (!apiKey || !apiSecret) {
-            return res.json({ available: 0, balance: 0, locked: 0, unrealizedPnl: 0, assetSymbol: '' });
+            return res.json({ available: 0, balance: 0, walletBalance: 0, locked: 0, unrealizedPnl: 0, assetSymbol: '' });
         }
         deltaApi.setCredentials(apiKey, apiSecret);
-        // Use query param currency if provided, else fallback to saved setting
         const currency = req.query.currency || db.getSetting('currency', 'INR');
         const balance = await deltaApi.getBalance(currency);
-        const budgetInfo = riskManager.getBudgetInfo(balance.balance);
-        res.json({ ...balance, budgetInfo });
+        const budgetInfo = riskManager.getBudgetInfo(balance.walletBalance || balance.available);
+
+        // Get exchange rate
+        let exchangeRates = deltaApi.getExchangeRates();
+        try { exchangeRates = await deltaApi.fetchExchangeRate(); } catch (e) { }
+
+        res.json({ ...balance, budgetInfo, exchangeRates });
     } catch (error) {
-        console.error('[BALANCE ERROR]', error.message);
-        res.json({ available: 0, balance: 0, locked: 0, unrealizedPnl: 0, assetSymbol: '', error: error.message });
+        res.json({ available: 0, balance: 0, walletBalance: 0, locked: 0, unrealizedPnl: 0, assetSymbol: '', error: error.message });
     }
 });
 
@@ -326,7 +336,6 @@ app.post('/api/settings/save-all', (req, res) => {
         }
     }
 
-    console.log(`[SETTINGS] Saved ${saved} settings`);
     res.json({ success: true, saved });
 });
 
@@ -345,10 +354,8 @@ app.get('*', (req, res) => {
 io.on('connection', (socket) => {
     console.log('🔌 Client connected:', socket.id);
 
-    // Send current status on connect
     socket.emit('bot:status', botEngine.getStatus());
 
-    // Send recent logs
     const logs = db.getLogs(20);
     socket.emit('bot:logs', logs);
 
@@ -365,7 +372,7 @@ server.listen(PORT, HOST, () => {
     console.log('');
     console.log('  ╔══════════════════════════════════════════╗');
     console.log('  ║                                          ║');
-    console.log('  ║   🤖 CryptoBOT Delta v1.0.0              ║');
+    console.log('  ║   🤖 CryptoBOT Delta v2.0.0              ║');
     console.log('  ║   Delta Exchange India Trading Bot        ║');
     console.log('  ║                                          ║');
     console.log(`  ║   🌐 http://localhost:${PORT}               ║`);

@@ -10,12 +10,15 @@ class DeltaExchangeAPI {
         this.client = axios.create({
             baseURL: this.baseUrl,
             timeout: 15000,
-            headers: { 'User-Agent': 'CryptoBOT/1.0' }
+            headers: { 'User-Agent': 'CryptoBOT/2.0' }
         });
+
+        // Live exchange rate cache
+        this._exchangeRates = { USD_INR: 94 };
+        this._rateLastFetch = 0;
     }
 
     setCredentials(apiKey, apiSecret) {
-        // Trim whitespace/invisible chars that may come from copy-paste
         this.apiKey = (apiKey || '').trim();
         this.apiSecret = (apiSecret || '').trim();
     }
@@ -27,12 +30,8 @@ class DeltaExchangeAPI {
 
     generateSignature(method, path, queryString = '', body = '') {
         const timestamp = Math.floor(Date.now() / 1000).toString();
-        // Delta format: METHOD + timestamp + path + query_string + body
         const message = method + timestamp + path + queryString + body;
         const signature = crypto.createHmac('sha256', this.apiSecret).update(message).digest('hex');
-        
-        console.log(`[AUTH] method=${method} path=${path} qs=${queryString ? '(has qs)' : '(none)'} body=${body ? '(has body)' : '(none)'} ts=${timestamp}`);
-        
         return { signature, timestamp };
     }
 
@@ -43,7 +42,7 @@ class DeltaExchangeAPI {
             'api-key': this.apiKey,
             'signature': signature,
             'timestamp': timestamp,
-            'User-Agent': 'CryptoBOT/1.0',
+            'User-Agent': 'CryptoBOT/2.0',
             'Content-Type': 'application/json'
         };
     }
@@ -108,9 +107,7 @@ class DeltaExchangeAPI {
         if (error.response) {
             const status = error.response.status;
             const data = error.response.data;
-            
-            // Delta Exchange can return errors in different formats:
-            // { error: "string" } or { error: { code: "...", context: {...} } } or { message: "..." }
+
             let msg = 'Unknown API error';
             if (data) {
                 if (typeof data === 'string') {
@@ -129,14 +126,6 @@ class DeltaExchangeAPI {
                 }
             }
 
-            console.error(`\n[DELTA API ERROR] Status: ${status}`);
-            console.error(`[DELTA API ERROR] Full Response: ${JSON.stringify(data, null, 2)}`);
-
-            // If Delta returns signature_data for debugging
-            if (data?.error?.context?.signature_data) {
-                console.error(`[DELTA API ERROR] Server signature_data: "${data.error.context.signature_data}"`);
-            }
-
             if (status === 429) return new Error('Rate limited. Please wait before retrying.');
             if (status === 401) return new Error(`Authentication failed (401): ${msg}`);
             if (status === 403) return new Error(`Permission denied (403): ${msg}`);
@@ -145,6 +134,60 @@ class DeltaExchangeAPI {
         if (error.code === 'ECONNABORTED') return new Error('Request timeout. Delta Exchange may be down.');
         if (error.code === 'ECONNREFUSED') return new Error('Connection refused. Delta Exchange API may be down.');
         return new Error(`Network error: ${error.message}`);
+    }
+
+    // === Exchange Rate ===
+
+    /**
+     * Fetch live USD/INR rate from Delta Exchange tickers
+     * Falls back to external APIs if Delta doesn't have it
+     */
+    async fetchExchangeRate() {
+        // Cache for 5 minutes
+        if (Date.now() - this._rateLastFetch < 300000 && this._exchangeRates.USD_INR) {
+            return this._exchangeRates;
+        }
+
+        try {
+            // Try Delta's USDINR ticker first
+            const tickers = await this.publicGet('/v2/tickers');
+            const results = tickers.result || tickers || [];
+
+            // Look for USDINR or similar pair
+            const inrTicker = results.find(t =>
+                t.symbol && (
+                    t.symbol.includes('USDINR') ||
+                    t.symbol.includes('USD_INR')
+                )
+            );
+
+            if (inrTicker && parseFloat(inrTicker.mark_price || inrTicker.close) > 0) {
+                const rate = parseFloat(inrTicker.mark_price || inrTicker.close);
+                this._exchangeRates.USD_INR = rate;
+                this._rateLastFetch = Date.now();
+                console.log(`[RATE] USD/INR from Delta: ₹${rate}`);
+                return this._exchangeRates;
+            }
+        } catch (e) { /* fallthrough */ }
+
+        // Fallback: try external API
+        try {
+            const res = await axios.get('https://api.exchangerate-api.com/v4/latest/USD', { timeout: 5000 });
+            if (res.data && res.data.rates && res.data.rates.INR) {
+                this._exchangeRates.USD_INR = res.data.rates.INR;
+                this._rateLastFetch = Date.now();
+                console.log(`[RATE] USD/INR from external API: ₹${this._exchangeRates.USD_INR}`);
+                return this._exchangeRates;
+            }
+        } catch (e) { /* fallthrough */ }
+
+        // Final fallback
+        console.log(`[RATE] Using cached USD/INR: ₹${this._exchangeRates.USD_INR}`);
+        return this._exchangeRates;
+    }
+
+    getExchangeRates() {
+        return this._exchangeRates;
     }
 
     // === Public Endpoints ===
@@ -184,47 +227,91 @@ class DeltaExchangeAPI {
         return data.result || [];
     }
 
+    /**
+     * Get balance — returns the ACTUAL wallet balance visible in Delta app
+     * Debug: logs raw API response to help verify correct field mapping
+     */
     async getBalance(asset = 'INR') {
         const balances = await this.getWalletBalances();
-        
-        // Debug: log all available assets
-        console.log(`[BALANCE] Looking for asset: ${asset}`);
-        console.log(`[BALANCE] Available assets: ${balances.map(b => b.asset_symbol + '=' + b.balance).join(', ')}`);
-        
-        // Try to find matching asset with multiple name variants
+
         const searchTerms = [asset];
         if (asset === 'USD') searchTerms.push('USDT', 'USDC');
         if (asset === 'USDT') searchTerms.push('USD', 'USDC');
         if (asset === 'INR') searchTerms.push('DINR');
-        
+
         let assetBalance = null;
         for (const term of searchTerms) {
-            assetBalance = balances.find(b => 
-                (b.asset_symbol || '').toUpperCase() === term.toUpperCase() || 
+            assetBalance = balances.find(b =>
+                (b.asset_symbol || '').toUpperCase() === term.toUpperCase() ||
                 (b.asset_id || '').toString() === term
             );
             if (assetBalance && parseFloat(assetBalance.balance || 0) > 0) break;
         }
-        
+
         // If still not found, use the first balance with money in it
         if (!assetBalance || parseFloat(assetBalance.balance || 0) === 0) {
             assetBalance = balances.find(b => parseFloat(b.balance || 0) > 0);
-            if (assetBalance) {
-                console.log(`[BALANCE] Fallback: using ${assetBalance.asset_symbol} (${assetBalance.balance})`);
-            }
         }
-        
+
         if (assetBalance) {
-            console.log(`[BALANCE] Found: ${assetBalance.asset_symbol} = ${assetBalance.balance} (available: ${assetBalance.available_balance})`);
+            // === RAW DELTA API FIELDS ===
+            // balance              = Total equity (cash + unrealized PnL + margin)
+            // available_balance    = Free cash you can withdraw/trade with
+            // position_margin      = Margin locked in open positions
+            // order_margin         = Margin reserved for open orders
+            // commission           = Fees
+            // unrealized_pnl       = P&L from open positions (not realized yet)
+            //
+            // WHAT USER SEES IN DELTA APP as "Wallet Balance" = available_balance
+            // (the free funds NOT locked in any position or order)
+
+            const rawBalance = parseFloat(assetBalance.balance || 0);
+            const rawAvailable = parseFloat(assetBalance.available_balance || 0);
+            const positionMargin = parseFloat(assetBalance.position_margin || 0);
+            const orderMargin = parseFloat(assetBalance.order_margin || 0);
+            const unrealizedPnl = parseFloat(assetBalance.unrealized_pnl || 0);
+            const commission = parseFloat(assetBalance.commission || 0);
+
+            // Debug log — helps verify which field matches Delta app
+            console.log(`[BALANCE DEBUG] Asset: ${assetBalance.asset_symbol}`);
+            console.log(`  Raw balance (equity):     ${rawBalance}`);
+            console.log(`  Raw available_balance:    ${rawAvailable}`);
+            console.log(`  position_margin:          ${positionMargin}`);
+            console.log(`  order_margin:             ${orderMargin}`);
+            console.log(`  unrealized_pnl:           ${unrealizedPnl}`);
+            console.log(`  commission:               ${commission}`);
+
+            // The actual wallet balance (what user sees in Delta app) = available_balance
+            // This is the free cash NOT locked in positions or orders
+            const walletBalance = rawAvailable;
+
+            // Equity = total portfolio value (includes locked margin + unrealized PnL)
+            const equity = rawBalance;
+
+            return {
+                available: walletBalance,            // Free cash for trading
+                balance: walletBalance,              // Display value (matches Delta app)
+                equity: equity,                      // Total equity (for reference)
+                walletBalance: walletBalance,         // Explicit: Delta app wallet balance
+                depositBalance: rawBalance - positionMargin - orderMargin - unrealizedPnl, // Pure deposited funds
+                positionMargin: positionMargin,
+                orderMargin: orderMargin,
+                marginUsed: positionMargin + orderMargin,
+                locked: positionMargin + orderMargin,
+                unrealizedPnl: unrealizedPnl,
+                assetSymbol: assetBalance.asset_symbol,
+                // Include raw fields for frontend debugging
+                _raw: {
+                    balance: rawBalance,
+                    available_balance: rawAvailable,
+                    position_margin: positionMargin,
+                    order_margin: orderMargin,
+                    unrealized_pnl: unrealizedPnl
+                }
+            };
         }
-        
-        return assetBalance ? {
-            available: parseFloat(assetBalance.available_balance || assetBalance.balance || 0),
-            balance: parseFloat(assetBalance.balance || 0),
-            locked: parseFloat(assetBalance.position_margin || 0) + parseFloat(assetBalance.order_margin || 0),
-            unrealizedPnl: parseFloat(assetBalance.unrealized_pnl || 0),
-            assetSymbol: assetBalance.asset_symbol
-        } : { available: 0, balance: 0, locked: 0, unrealizedPnl: 0, assetSymbol: asset };
+
+        return { available: 0, balance: 0, walletBalance: 0, equity: 0, depositBalance: 0, totalBalance: 0, marginUsed: 0, locked: 0, unrealizedPnl: 0, assetSymbol: asset };
     }
 
     async getPositions() {
@@ -311,10 +398,6 @@ class DeltaExchangeAPI {
             if (!this.apiKey || !this.apiSecret) {
                 return { connected: false, error: 'API credentials not set' };
             }
-
-            console.log(`[TEST] Testing with API Key: ${this.apiKey.substring(0, 6)}...${this.apiKey.slice(-4)} (length: ${this.apiKey.length})`);
-            console.log(`[TEST] API Secret length: ${this.apiSecret.length}`);
-            console.log(`[TEST] Base URL: ${this.client.defaults.baseURL}`);
 
             const balances = await this.getWalletBalances();
             return { connected: true, balances };

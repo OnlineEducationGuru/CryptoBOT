@@ -1,6 +1,7 @@
 /**
  * Core Bot Trading Engine
  * Handles market scanning, strategy execution, order placement, and lifecycle
+ * v2.1: Fresh research enforcement, comprehensive trade reasoning
  */
 const deltaApi = require('./delta-api');
 const strategyManager = require('./strategies');
@@ -18,6 +19,8 @@ class BotEngine {
         this.tradeableProducts = [];
         this.scanCount = 0;
         this.tradesPlacedThisScan = 0;
+        // Fresh research: no caching of any market data
+        this._lastScanTimestamp = null;
     }
 
     setIO(io) {
@@ -119,16 +122,17 @@ class BotEngine {
     async scan() {
         this.scanCount++;
         this.tradesPlacedThisScan = 0;
+        this._lastScanTimestamp = Date.now(); // Fresh research timestamp
         const settings = riskManager.getSettings();
         const sym = settings.currency === 'INR' ? '₹' : (settings.currency === 'BTC' ? '₿' : '$');
 
-        // Get current balance
+        // === FRESH RESEARCH: Always fetch fresh balance ===
         let balance;
         try { balance = await deltaApi.getBalance(settings.currency); } 
         catch (error) { this.log('error', `Failed to get balance: ${error.message}`); return; }
         if (this.io) this.io.emit('bot:balance', balance);
 
-        // Get tickers
+        // === FRESH RESEARCH: Always fetch fresh tickers (no cache) ===
         let tickers;
         try { tickers = await deltaApi.getTickers(); } 
         catch (error) { this.log('error', `Failed to get tickers: ${error.message}`); return; }
@@ -142,7 +146,7 @@ class BotEngine {
         const priceFilteredOut = tickers.length - filteredTickers.length;
 
         // === SCAN START LOG ===
-        this.log('info', `🔍 Scan #${this.scanCount} | Balance: ${sym}${(balance.balance || 0).toFixed(2)} | Cryptos: ${filteredTickers.length} (${priceFilteredOut} out of range) | Strategy: ${strategyManager.getActiveStrategy().name}`);
+        this.log('info', `🔍 Scan #${this.scanCount} | Balance: ${sym}${(balance.balance || 0).toFixed(2)} | Cryptos: ${filteredTickers.length} (${priceFilteredOut} out of range) | Strategy: ${strategyManager.getActiveStrategy().name} | Fresh@${new Date().toISOString()}`);
 
         // Track scan stats
         let stats = { analyzed: 0, riskBlocked: 0, noData: 0, noSignal: 0, signalsFound: 0, fakeRejected: 0, tradesPlaced: 0 };
@@ -221,16 +225,16 @@ class BotEngine {
             return;
         }
 
-        // Get candle data
+        // === FRESH RESEARCH: Fetch fresh candle data for EVERY analysis ===
         let candles;
         try {
             const end = Math.floor(Date.now() / 1000);
-            const start = end - (60 * 60 * 4);
+            const start = end - (60 * 60 * 4); // 4 hours of 5m candles
             candles = await deltaApi.getCandles(symbol, '5m', start, end);
         } catch (error) { stats.noData++; return; }
         if (!candles || candles.length < 30) { stats.noData++; return; }
 
-        // Prepare market data
+        // Prepare market data — ALWAYS fresh, never cached
         const marketData = {
             symbol,
             closes: candles.map(c => parseFloat(c.close)),
@@ -240,7 +244,8 @@ class BotEngine {
             volumes: candles.map(c => parseFloat(c.volume)),
             bid: parseFloat(ticker.bid || 0),
             ask: parseFloat(ticker.ask || 0),
-            currentPrice: price
+            currentPrice: price,
+            fetchedAt: new Date().toISOString() // Proof of fresh data
         };
 
         // Run strategy
@@ -269,11 +274,11 @@ class BotEngine {
             return;
         }
 
-        const traded = await this.executeTrade(symbol, signal, price, balance, ticker, strategyName);
+        const traded = await this.executeTrade(symbol, signal, price, balance, ticker, strategyName, validation, marketData);
         if (traded) stats.tradesPlaced++;
     }
 
-    async executeTrade(symbol, signal, price, balance, ticker, strategyName) {
+    async executeTrade(symbol, signal, price, balance, ticker, strategyName, validation, marketData) {
         const settings = riskManager.getSettings();
         const sym = settings.currency === 'INR' ? '₹' : (settings.currency === 'BTC' ? '₿' : '$');
 
@@ -293,6 +298,60 @@ class BotEngine {
             if (settings.leverage > 1) await deltaApi.setLeverage(product.id, settings.leverage);
         } catch (error) { this.log('warning', `Leverage error ${symbol}: ${error.message}`); }
 
+        // === BUILD COMPREHENSIVE TRADE REASONING ===
+        const tradeReasoning = {
+            // Why this trade was taken
+            strategy: strategyName,
+            strategyDescription: strategyManager.getActiveStrategy()?.description || '',
+            signal: signal.signal,
+            side: signal.side,
+            confidence: signal.confidence,
+            reason: signal.reason,
+
+            // Market conditions at time of trade
+            marketConditions: {
+                price: price,
+                bid: marketData.bid,
+                ask: marketData.ask,
+                spread: marketData.ask > 0 ? ((marketData.ask - marketData.bid) / marketData.bid * 100).toFixed(4) + '%' : 'N/A',
+                volume24h: ticker.volume || 0,
+                change24h: ticker.close && ticker.open ? (((parseFloat(ticker.close) - parseFloat(ticker.open)) / parseFloat(ticker.open)) * 100).toFixed(2) + '%' : 'N/A',
+                dataFreshness: marketData.fetchedAt
+            },
+
+            // Validation results
+            validation: {
+                score: validation.confidence + '%',
+                checksPassed: `${validation.passedCount}/${validation.totalChecks}`,
+                passedChecks: validation.passed || [],
+                failedChecks: validation.reasons || [],
+                details: (validation.details || []).map(d => `${d.name}: ${d.reason} (${d.score}pts)`)
+            },
+
+            // Risk parameters
+            risk: {
+                takeProfit: exits.takeProfit,
+                stopLoss: exits.stopLoss,
+                tpPercent: settings.profitPercent + '%',
+                slPercent: settings.stopLossPercent + '%',
+                leverage: settings.leverage + 'x',
+                quantity: quantity,
+                estimatedCost: (price * quantity).toFixed(2)
+            },
+
+            // Fresh research proof
+            freshResearch: {
+                scanNumber: this.scanCount,
+                dataFetchedAt: marketData.fetchedAt,
+                candleCount: marketData.closes.length,
+                candleTimeframe: '5m',
+                lookbackHours: 4
+            }
+        };
+
+        // Human-readable trade explanation
+        const humanReason = this.buildHumanReadableReason(tradeReasoning);
+
         // Place bracket order with TP + SL
         try {
             this.log('trade', `📝 ORDER: ${signal.side.toUpperCase()} ${symbol} | Qty: ${quantity} | ~${price} | TP: ${exits.takeProfit} (+${settings.profitPercent}%) | SL: ${exits.stopLoss} (-${settings.stopLossPercent}%) | By: ${strategyName} | WHY: ${signal.reason}`);
@@ -306,7 +365,7 @@ class BotEngine {
                 stop_loss_price: exits.stopLoss
             });
 
-            // Record trade in DB
+            // Record trade in DB with comprehensive reasoning
             db.addTrade({
                 trade_id: order.id || `T${Date.now()}`,
                 symbol, side: signal.side, order_type: 'market',
@@ -316,7 +375,13 @@ class BotEngine {
                     takeProfit: exits.takeProfit,
                     stopLoss: exits.stopLoss,
                     reason: signal.reason,
-                    strategy: strategyName
+                    humanReason: humanReason,
+                    strategy: strategyName,
+                    strategyDescription: tradeReasoning.strategyDescription,
+                    marketConditions: tradeReasoning.marketConditions,
+                    validation: tradeReasoning.validation,
+                    risk: tradeReasoning.risk,
+                    freshResearch: tradeReasoning.freshResearch
                 })
             });
 
@@ -325,14 +390,15 @@ class BotEngine {
 
             riskManager.setCooldown(symbol);
 
-            this.log('success', `🎯 FILLED: ${signal.side.toUpperCase()} ${quantity}x ${symbol} @ ~${price} | TP: ${exits.takeProfit} | SL: ${exits.stopLoss} | ${strategyName} — ${signal.reason}`);
+            this.log('success', `🎯 FILLED: ${signal.side.toUpperCase()} ${quantity}x ${symbol} @ ~${price} | TP: ${exits.takeProfit} | SL: ${exits.stopLoss} | ${strategyName} — ${humanReason}`);
 
             // Emit trade + refresh events
             if (this.io) {
                 this.io.emit('bot:trade', {
                     symbol, side: signal.side, quantity, price,
                     takeProfit: exits.takeProfit, stopLoss: exits.stopLoss,
-                    strategy: strategyName, reason: signal.reason,
+                    strategy: strategyName, reason: humanReason,
+                    tradeReasoning,
                     timestamp: new Date().toISOString()
                 });
             }
@@ -342,6 +408,34 @@ class BotEngine {
             this.log('error', `❌ Order FAILED ${symbol}: ${error.message}`);
             return false;
         }
+    }
+
+    /**
+     * Build a human-readable explanation of why a trade was taken
+     */
+    buildHumanReadableReason(reasoning) {
+        const parts = [];
+
+        // Main signal reason
+        parts.push(reasoning.reason);
+
+        // Strategy context
+        parts.push(`Strategy: ${reasoning.strategy}`);
+
+        // Confidence
+        parts.push(`Confidence: ${reasoning.confidence}%`);
+
+        // Validation summary
+        if (reasoning.validation) {
+            parts.push(`Validated: ${reasoning.validation.checksPassed} checks passed (${reasoning.validation.score})`);
+        }
+
+        // Market context
+        if (reasoning.marketConditions?.change24h && reasoning.marketConditions.change24h !== 'N/A') {
+            parts.push(`24h Change: ${reasoning.marketConditions.change24h}`);
+        }
+
+        return parts.join(' | ');
     }
 
     async checkOpenPositions() {

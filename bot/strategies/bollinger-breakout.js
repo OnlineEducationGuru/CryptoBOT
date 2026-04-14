@@ -1,12 +1,12 @@
 /**
- * Bollinger Band Breakout Strategy
- * Buy at lower band, Sell at upper band
+ * Bollinger Band Breakout Strategy (Optimized)
+ * Enhanced with squeeze detection, %B slope analysis, and volume confirmation
  */
 class BollingerBreakoutStrategy {
     constructor() {
         this.id = 'bollinger-breakout';
         this.name = 'Bollinger Breakout';
-        this.description = 'Buy at lower Bollinger Band, Sell at upper band. Best for volatility trading.';
+        this.description = 'Bollinger Bands with squeeze detection + volume confirmation.';
         this.winRate = 60;
         this.timeframe = '15m - 1h';
         this.riskLevel = 'Aggressive';
@@ -33,13 +33,33 @@ class BollingerBreakoutStrategy {
             upper: sma + (this.stdDevMultiplier * stdDev),
             middle: sma,
             lower: sma - (this.stdDevMultiplier * stdDev),
-            bandwidth: ((sma + this.stdDevMultiplier * stdDev) - (sma - this.stdDevMultiplier * stdDev)) / sma * 100
+            bandwidth: ((sma + this.stdDevMultiplier * stdDev) - (sma - this.stdDevMultiplier * stdDev)) / sma * 100,
+            stdDev
+        };
+    }
+
+    // Detect Bollinger squeeze (bands getting tight = breakout imminent)
+    detectSqueeze(closes) {
+        if (closes.length < this.period + 10) return { isSqueeze: false };
+
+        const currentBands = this.calculateBollingerBands(closes);
+        const pastBands = this.calculateBollingerBands(closes.slice(0, -5));
+
+        if (!currentBands || !pastBands) return { isSqueeze: false };
+
+        // Squeeze = current bandwidth is significantly lower than recent
+        const bwRatio = currentBands.bandwidth / pastBands.bandwidth;
+        return {
+            isSqueeze: bwRatio < 0.7,
+            ratio: bwRatio,
+            currentBW: currentBands.bandwidth,
+            pastBW: pastBands.bandwidth
         };
     }
 
     analyze(marketData) {
-        const { closes } = marketData;
-        if (!closes || closes.length < this.period + 2) {
+        const { closes, volumes } = marketData;
+        if (!closes || closes.length < this.period + 5) {
             return { signal: 'none', confidence: 0, reason: 'Insufficient data' };
         }
 
@@ -52,29 +72,71 @@ class BollingerBreakoutStrategy {
 
         const currentPrice = closes[closes.length - 1];
         const prevPrice = closes[closes.length - 2];
-
-        // Calculate %B (position within bands)
         const percentB = (currentPrice - bands.lower) / (bands.upper - bands.lower);
+        const prevPercentB = (prevPrice - prevBands.lower) / (prevBands.upper - prevBands.lower);
+        const percentBSlope = percentB - prevPercentB;
 
-        // Buy: Price touches or goes below lower band
+        // Check volume confirmation
+        let volumeConfirmed = true;
+        if (volumes && volumes.length >= 10) {
+            const recentVol = volumes[volumes.length - 1];
+            const avgVol = volumes.slice(-10).reduce((a, b) => a + b, 0) / 10;
+            volumeConfirmed = recentVol > avgVol * 0.8; // At least 80% of average
+        }
+
+        // Check squeeze
+        const squeeze = this.detectSqueeze(closes);
+
+        // Buy: Price touches or goes below lower band WITH confirmation
         if (currentPrice <= bands.lower || (prevPrice < prevBands.lower && currentPrice > bands.lower)) {
+            // Require %B turning up (not still falling)
+            if (percentBSlope < -0.05 && currentPrice <= bands.lower) {
+                return { signal: 'none', confidence: 15, reason: `At lower band but %B still falling (slope: ${percentBSlope.toFixed(3)})` };
+            }
+
+            if (!volumeConfirmed) {
+                return { signal: 'none', confidence: 15, reason: 'At lower band but low volume — weak signal' };
+            }
+
             const distance = ((bands.lower - currentPrice) / bands.lower) * 100;
-            const confidence = Math.min(90, 55 + Math.max(0, distance) * 15);
+            let confidence = Math.min(90, 55 + Math.max(0, distance) * 15);
+            let reason = `Price at lower BB (%B: ${(percentB * 100).toFixed(1)}%)`;
+
+            if (squeeze.isSqueeze) {
+                confidence = Math.min(92, confidence + 8);
+                reason += ' + squeeze breakout';
+            }
+
             return {
                 signal: 'buy', side: 'buy', confidence,
-                reason: `Price at lower Bollinger Band (%B: ${(percentB * 100).toFixed(1)}%)`,
-                indicator: { upper: bands.upper.toFixed(2), middle: bands.middle.toFixed(2), lower: bands.lower.toFixed(2), percentB: (percentB * 100).toFixed(1) }
+                reason,
+                indicator: { upper: bands.upper.toFixed(2), middle: bands.middle.toFixed(2), lower: bands.lower.toFixed(2), percentB: (percentB * 100).toFixed(1), squeeze: squeeze.isSqueeze }
             };
         }
 
-        // Sell: Price touches or goes above upper band
+        // Sell: Price touches or goes above upper band WITH confirmation
         if (currentPrice >= bands.upper || (prevPrice > prevBands.upper && currentPrice < bands.upper)) {
+            if (percentBSlope > 0.05 && currentPrice >= bands.upper) {
+                return { signal: 'none', confidence: 15, reason: `At upper band but %B still rising (slope: ${percentBSlope.toFixed(3)})` };
+            }
+
+            if (!volumeConfirmed) {
+                return { signal: 'none', confidence: 15, reason: 'At upper band but low volume — weak signal' };
+            }
+
             const distance = ((currentPrice - bands.upper) / bands.upper) * 100;
-            const confidence = Math.min(90, 55 + Math.max(0, distance) * 15);
+            let confidence = Math.min(90, 55 + Math.max(0, distance) * 15);
+            let reason = `Price at upper BB (%B: ${(percentB * 100).toFixed(1)}%)`;
+
+            if (squeeze.isSqueeze) {
+                confidence = Math.min(92, confidence + 8);
+                reason += ' + squeeze breakout';
+            }
+
             return {
                 signal: 'sell', side: 'sell', confidence,
-                reason: `Price at upper Bollinger Band (%B: ${(percentB * 100).toFixed(1)}%)`,
-                indicator: { upper: bands.upper.toFixed(2), middle: bands.middle.toFixed(2), lower: bands.lower.toFixed(2), percentB: (percentB * 100).toFixed(1) }
+                reason,
+                indicator: { upper: bands.upper.toFixed(2), middle: bands.middle.toFixed(2), lower: bands.lower.toFixed(2), percentB: (percentB * 100).toFixed(1), squeeze: squeeze.isSqueeze }
             };
         }
 

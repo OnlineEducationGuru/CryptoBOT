@@ -108,7 +108,7 @@
         </div>
 
         <!-- ===== MARKET PAGE ===== -->
-        <div class="page" id="page-market" style="display:none">
+        <div class="page" id="page-market">
             <div class="market-sticky-header">
                 <div class="search-box">
                     <span class="search-icon">🔍</span>
@@ -152,21 +152,37 @@
                     <div class="value text-red" id="tradeLosses">0</div>
                 </div>
                 <div class="trade-stat">
-                    <div class="label">P&L</div>
-                    <div class="value" id="tradePnl">₹0</div>
+                    <div class="label">Win Rate</div>
+                    <div class="value" id="tradeWinRate">0%</div>
                 </div>
+                <div class="trade-stat">
+                    <div class="label">P&L</div>
+                    <div class="value" id="tradePnl">$0</div>
+                </div>
+            </div>
+
+            <!-- Filter Tabs -->
+            <div class="trade-filter-tabs">
+                <button class="trade-filter-tab active" onclick="Trades.setFilter('all', this)">All</button>
+                <button class="trade-filter-tab" onclick="Trades.setFilter('open', this)">🔵 Open</button>
+                <button class="trade-filter-tab" onclick="Trades.setFilter('closed', this)">Closed</button>
+                <button class="trade-filter-tab" onclick="Trades.setFilter('wins', this)">🟢 Wins</button>
+                <button class="trade-filter-tab" onclick="Trades.setFilter('losses', this)">🔴 Losses</button>
             </div>
 
             <div class="trade-history">
                 <div class="trade-history-header">
                     <span class="trade-history-title">📜 Trade History</span>
-                    <button class="btn-clear" id="btnClearHistory" onclick="Trades.clearHistory()">🗑 Clear History</button>
+                    <div style="display:flex;gap:6px;">
+                        <button class="btn-export" onclick="Trades.exportCSV()">📥 Export CSV</button>
+                        <button class="btn-clear" id="btnClearHistory" onclick="Trades.clearHistory()">🗑 Clear</button>
+                    </div>
                 </div>
                 <div class="trade-list" id="tradeList">
                     <div class="empty-state">
                         <div class="icon">📊</div>
                         <div class="title">No Trades Yet</div>
-                        <div class="desc">Bot will record all trades here</div>
+                        <div class="desc">Bot will record all trades here with detailed reasoning</div>
                     </div>
                 </div>
             </div>
