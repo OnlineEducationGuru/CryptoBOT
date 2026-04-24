@@ -1,4 +1,4 @@
-const Database = require('better-sqlite3');
+const initSqlJs = require('sql.js');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
@@ -11,13 +11,41 @@ const ENCRYPTION_KEY = crypto.scryptSync('CryptoBOT-Delta-Secure-2024', 'salt-de
 
 class BotDatabase {
     constructor() {
-        this.db = new Database(DB_PATH);
-        this.db.pragma('journal_mode = WAL');
+        this.db = null;
+        this._ready = false;
+    }
+
+    /**
+     * Initialize the database (async — must be called before using any methods)
+     */
+    async init() {
+        const SQL = await initSqlJs();
+
+        // Load existing database if it exists
+        if (fs.existsSync(DB_PATH)) {
+            const fileBuffer = fs.readFileSync(DB_PATH);
+            this.db = new SQL.Database(fileBuffer);
+        } else {
+            this.db = new SQL.Database();
+        }
+
         this.migrate();
+        this._ready = true;
+        return this;
+    }
+
+    /**
+     * Save database to disk
+     */
+    _save() {
+        if (!this.db) return;
+        const data = this.db.export();
+        const buffer = Buffer.from(data);
+        fs.writeFileSync(DB_PATH, buffer);
     }
 
     migrate() {
-        this.db.exec(`
+        this.db.run(`
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
@@ -59,12 +87,15 @@ class BotDatabase {
                 total_loss REAL DEFAULT 0,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
-
-            CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
-            CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
-            CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time);
-            CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at);
         `);
+
+        // Create indexes individually (sql.js handles CREATE INDEX IF NOT EXISTS)
+        try { this.db.run('CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)'); } catch(e) {}
+        try { this.db.run('CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)'); } catch(e) {}
+        try { this.db.run('CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)'); } catch(e) {}
+        try { this.db.run('CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at)'); } catch(e) {}
+
+        this._save();
     }
 
     // === Encryption ===
@@ -94,17 +125,41 @@ class BotDatabase {
         }
     }
 
+    // === Helper: run a SELECT and return all rows ===
+    _all(sql, params = []) {
+        const stmt = this.db.prepare(sql);
+        stmt.bind(params);
+        const rows = [];
+        while (stmt.step()) {
+            rows.push(stmt.getAsObject());
+        }
+        stmt.free();
+        return rows;
+    }
+
+    // === Helper: run a SELECT and return first row ===
+    _get(sql, params = []) {
+        const rows = this._all(sql, params);
+        return rows.length > 0 ? rows[0] : null;
+    }
+
+    // === Helper: run an INSERT/UPDATE/DELETE ===
+    _run(sql, params = []) {
+        this.db.run(sql, params);
+        this._save();
+    }
+
     // === Settings ===
     getSetting(key, defaultValue = null) {
-        const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+        const row = this._get('SELECT value FROM settings WHERE key = ?', [key]);
         return row ? row.value : defaultValue;
     }
 
     setSetting(key, value) {
-        this.db.prepare(`
-            INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = CURRENT_TIMESTAMP
-        `).run(key, value, value);
+        this._run(`
+            INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')
+        `, [key, value, value]);
     }
 
     getEncryptedSetting(key) {
@@ -117,7 +172,7 @@ class BotDatabase {
     }
 
     getAllSettings() {
-        const rows = this.db.prepare('SELECT key, value FROM settings').all();
+        const rows = this._all('SELECT key, value FROM settings');
         const settings = {};
         const encryptedKeys = ['api_key', 'api_secret'];
         for (const row of rows) {
@@ -132,10 +187,10 @@ class BotDatabase {
 
     // === Trades ===
     addTrade(trade) {
-        return this.db.prepare(`
+        this._run(`
             INSERT INTO trades (trade_id, symbol, side, order_type, price, quantity, strategy, status, notes)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
+        `, [
             trade.trade_id || `T${Date.now()}`,
             trade.symbol,
             trade.side,
@@ -145,31 +200,31 @@ class BotDatabase {
             trade.strategy || 'manual',
             trade.status || 'open',
             trade.notes || ''
-        );
+        ]);
     }
 
     closeTrade(tradeId, exitPrice, pnl, fees = 0) {
-        return this.db.prepare(`
-            UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, fees = ?, exit_time = CURRENT_TIMESTAMP
+        this._run(`
+            UPDATE trades SET status = 'closed', exit_price = ?, pnl = ?, fees = ?, exit_time = datetime('now')
             WHERE id = ? AND status = 'open'
-        `).run(exitPrice, pnl, fees, tradeId);
+        `, [exitPrice, pnl, fees, tradeId]);
     }
 
     getOpenTrades() {
-        return this.db.prepare('SELECT * FROM trades WHERE status = ? ORDER BY entry_time DESC').all('open');
+        return this._all('SELECT * FROM trades WHERE status = ? ORDER BY entry_time DESC', ['open']);
     }
 
     getTradeHistory(limit = 100) {
-        return this.db.prepare('SELECT * FROM trades ORDER BY entry_time DESC LIMIT ?').all(limit);
+        return this._all('SELECT * FROM trades ORDER BY entry_time DESC LIMIT ?', [limit]);
     }
 
     getTradeStats() {
-        const total = this.db.prepare('SELECT COUNT(*) as count FROM trades').get();
-        const closed = this.db.prepare('SELECT COUNT(*) as count FROM trades WHERE status = ?').get('closed');
-        const wins = this.db.prepare('SELECT COUNT(*) as count FROM trades WHERE status = ? AND pnl > 0').get('closed');
-        const losses = this.db.prepare('SELECT COUNT(*) as count FROM trades WHERE status = ? AND pnl <= 0').get('closed');
-        const totalPnl = this.db.prepare('SELECT COALESCE(SUM(pnl), 0) as total FROM trades WHERE status = ?').get('closed');
-        const openCount = this.db.prepare('SELECT COUNT(*) as count FROM trades WHERE status = ?').get('open');
+        const total = this._get('SELECT COUNT(*) as count FROM trades');
+        const closed = this._get('SELECT COUNT(*) as count FROM trades WHERE status = ?', ['closed']);
+        const wins = this._get('SELECT COUNT(*) as count FROM trades WHERE status = ? AND pnl > 0', ['closed']);
+        const losses = this._get('SELECT COUNT(*) as count FROM trades WHERE status = ? AND pnl <= 0', ['closed']);
+        const totalPnl = this._get('SELECT COALESCE(SUM(pnl), 0) as total FROM trades WHERE status = ?', ['closed']);
+        const openCount = this._get('SELECT COUNT(*) as count FROM trades WHERE status = ?', ['open']);
         
         return {
             totalTrades: total.count,
@@ -183,15 +238,15 @@ class BotDatabase {
     }
 
     clearTradeHistory() {
-        return this.db.prepare('DELETE FROM trades WHERE status = ?').run('closed');
+        this._run('DELETE FROM trades WHERE status = ?', ['closed']);
     }
 
     // === Daily Stats ===
     getTodayStats() {
         const today = new Date().toISOString().split('T')[0];
-        let stats = this.db.prepare('SELECT * FROM daily_stats WHERE date = ?').get(today);
+        let stats = this._get('SELECT * FROM daily_stats WHERE date = ?', [today]);
         if (!stats) {
-            this.db.prepare('INSERT OR IGNORE INTO daily_stats (date) VALUES (?)').run(today);
+            this._run('INSERT OR IGNORE INTO daily_stats (date) VALUES (?)', [today]);
             stats = { date: today, total_trades: 0, win_trades: 0, loss_trades: 0, total_pnl: 0, total_loss: 0 };
         }
         return stats;
@@ -199,48 +254,53 @@ class BotDatabase {
 
     updateDailyStats(isWin, pnl) {
         const today = new Date().toISOString().split('T')[0];
-        this.db.prepare('INSERT OR IGNORE INTO daily_stats (date) VALUES (?)').run(today);
+        this._run('INSERT OR IGNORE INTO daily_stats (date) VALUES (?)', [today]);
         
         if (isWin) {
-            this.db.prepare(`
+            this._run(`
                 UPDATE daily_stats SET total_trades = total_trades + 1, win_trades = win_trades + 1, 
-                total_pnl = total_pnl + ?, updated_at = CURRENT_TIMESTAMP WHERE date = ?
-            `).run(pnl, today);
+                total_pnl = total_pnl + ?, updated_at = datetime('now') WHERE date = ?
+            `, [pnl, today]);
         } else {
-            this.db.prepare(`
+            this._run(`
                 UPDATE daily_stats SET total_trades = total_trades + 1, loss_trades = loss_trades + 1,
-                total_pnl = total_pnl + ?, total_loss = total_loss + ?, updated_at = CURRENT_TIMESTAMP WHERE date = ?
-            `).run(pnl, Math.abs(pnl), today);
+                total_pnl = total_pnl + ?, total_loss = total_loss + ?, updated_at = datetime('now') WHERE date = ?
+            `, [pnl, Math.abs(pnl), today]);
         }
     }
 
     // Increment trade count when order is placed (without PnL)
     updateDailyTradeCount() {
         const today = new Date().toISOString().split('T')[0];
-        this.db.prepare('INSERT OR IGNORE INTO daily_stats (date) VALUES (?)').run(today);
-        this.db.prepare(`UPDATE daily_stats SET total_trades = total_trades + 1, updated_at = CURRENT_TIMESTAMP WHERE date = ?`).run(today);
+        this._run('INSERT OR IGNORE INTO daily_stats (date) VALUES (?)', [today]);
+        this._run(`UPDATE daily_stats SET total_trades = total_trades + 1, updated_at = datetime('now') WHERE date = ?`, [today]);
     }
 
     // === Logs ===
     addLog(level, message, data = null) {
-        this.db.prepare('INSERT INTO logs (level, message, data) VALUES (?, ?, ?)').run(
+        this._run('INSERT INTO logs (level, message, data) VALUES (?, ?, ?)', [
             level, message, data ? JSON.stringify(data) : null
-        );
+        ]);
         // Keep only last 1000 logs
-        this.db.prepare('DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 1000)').run();
+        this._run('DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 1000)');
     }
 
     getLogs(limit = 50) {
-        return this.db.prepare('SELECT * FROM logs ORDER BY id DESC LIMIT ?').all(limit);
+        return this._all('SELECT * FROM logs ORDER BY id DESC LIMIT ?', [limit]);
     }
 
     clearLogs() {
-        return this.db.prepare('DELETE FROM logs').run();
+        this._run('DELETE FROM logs');
     }
 
     close() {
-        this.db.close();
+        if (this.db) {
+            this._save();
+            this.db.close();
+        }
     }
 }
 
-module.exports = new BotDatabase();
+// Export a singleton instance — but it needs async init
+const instance = new BotDatabase();
+module.exports = instance;
