@@ -348,11 +348,16 @@ class DeltaExchangeAPI {
             product_id: order.product_id,
             size: order.size,
             side: order.side,
-            order_type: order.order_type || 'market_order',
-            bracket_take_profit_price: order.take_profit_price?.toString(),
-            bracket_stop_loss_price: order.stop_loss_price?.toString(),
-            bracket_stop_trigger_method: order.trigger_method || 'mark_price'
+            order_type: order.order_type || 'market_order'
         };
+        // Only include bracket fields when they have values
+        if (order.take_profit_price) {
+            payload.bracket_take_profit_price = order.take_profit_price.toString();
+        }
+        if (order.stop_loss_price) {
+            payload.bracket_stop_loss_price = order.stop_loss_price.toString();
+            payload.bracket_stop_trigger_method = order.trigger_method || 'mark_price';
+        }
         if (order.limit_price) payload.limit_price = order.limit_price.toString();
 
         const data = await this.privatePost('/v2/orders', payload);

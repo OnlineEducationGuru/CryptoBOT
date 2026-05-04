@@ -214,8 +214,9 @@ const Trades = {
                 html += `
                     <div class="detail-section">
                         <div class="detail-section-title">🛡️ Risk Management</div>
-                        ${notes.takeProfit ? `<div class="detail-row"><span>Take Profit</span><span class="text-green">$${parseFloat(notes.takeProfit).toFixed(4)}</span></div>` : ''}
+                        ${notes.takeProfit ? `<div class="detail-row"><span>Closing Order</span><span class="text-green">$${parseFloat(notes.takeProfit).toFixed(4)}</span></div>` : ''}
                         ${notes.stopLoss ? `<div class="detail-row"><span>Stop Loss</span><span class="text-red">$${parseFloat(notes.stopLoss).toFixed(4)}</span></div>` : ''}
+                        ${notes.closingOrderId ? `<div class="detail-row"><span>Closing Order ID</span><span>${notes.closingOrderId}</span></div>` : ''}
                         ${notes.risk?.leverage ? `<div class="detail-row"><span>Leverage</span><span>${notes.risk.leverage}</span></div>` : ''}
                         ${notes.risk?.estimatedCost ? `<div class="detail-row"><span>Position Value</span><span>$${notes.risk.estimatedCost}</span></div>` : ''}
                     </div>`;

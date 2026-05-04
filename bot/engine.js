@@ -1,7 +1,7 @@
 /**
  * Core Bot Trading Engine
  * Handles market scanning, strategy execution, order placement, and lifecycle
- * v2.1: Fresh research enforcement, comprehensive trade reasoning
+ * v2.2: Fixed stale position tracking, closing order flow (not TP)
  */
 const deltaApi = require('./delta-api');
 const strategyManager = require('./strategies');
@@ -126,6 +126,10 @@ class BotEngine {
         const settings = riskManager.getSettings();
         const sym = settings.currency === 'INR' ? '₹' : (settings.currency === 'BTC' ? '₿' : '$');
 
+        // === RECONCILE FIRST: Sync DB with exchange BEFORE checking limits ===
+        // This fixes the bug where stale "open" trades in DB block new orders
+        await this.checkOpenPositions();
+
         // === FRESH RESEARCH: Always fetch fresh balance ===
         let balance;
         try { balance = await deltaApi.getBalance(settings.currency); } 
@@ -151,7 +155,7 @@ class BotEngine {
         // Track scan stats
         let stats = { analyzed: 0, riskBlocked: 0, noData: 0, noSignal: 0, signalsFound: 0, fakeRejected: 0, tradesPlaced: 0 };
 
-        // === CHECK GLOBAL LIMITS FIRST ===
+        // === CHECK GLOBAL LIMITS (after reconciliation) ===
         const globalCheck = this.checkGlobalLimits(settings, balance, sym);
         if (!globalCheck.allowed) {
             this.log('warning', globalCheck.reason);
@@ -175,9 +179,6 @@ class BotEngine {
         if (stats.fakeRejected > 0) parts.push(`🚫 Fake rejected: ${stats.fakeRejected}`);
         if (stats.tradesPlaced > 0) parts.push(`✅ Trades: ${stats.tradesPlaced}`);
         this.log('info', `📊 Scan #${this.scanCount} done | ${parts.join(' | ')}`);
-
-        // Check existing open positions for closure
-        await this.checkOpenPositions();
     }
 
     checkGlobalLimits(settings, balance, sym) {
@@ -352,18 +353,36 @@ class BotEngine {
         // Human-readable trade explanation
         const humanReason = this.buildHumanReadableReason(tradeReasoning);
 
-        // Place bracket order with TP + SL
+        // === STEP 1: Place OPENING order (market) with SL only (no bracket TP) ===
         try {
-            this.log('trade', `📝 ORDER: ${signal.side.toUpperCase()} ${symbol} | Qty: ${quantity} | ~${price} | TP: ${exits.takeProfit} (+${settings.profitPercent}%) | SL: ${exits.stopLoss} (-${settings.stopLossPercent}%) | By: ${strategyName} | WHY: ${signal.reason}`);
+            this.log('trade', `📝 OPENING ORDER: ${signal.side.toUpperCase()} ${symbol} | Qty: ${quantity} | ~${price} | SL: ${exits.stopLoss} (-${settings.stopLossPercent}%) | By: ${strategyName} | WHY: ${signal.reason}`);
 
             const order = await deltaApi.placeBracketOrder({
                 product_id: product.id,
                 size: quantity,
                 side: signal.side,
                 order_type: 'market_order',
-                take_profit_price: exits.takeProfit,
+                // NO take_profit_price — closing order handles that
                 stop_loss_price: exits.stopLoss
             });
+
+            // === STEP 2: Place CLOSING order (reduce-only limit at target price) ===
+            const closingSide = signal.side === 'buy' ? 'sell' : 'buy';
+            let closingOrderId = null;
+            try {
+                const closingOrder = await deltaApi.placeOrder({
+                    product_id: product.id,
+                    size: quantity,
+                    side: closingSide,
+                    order_type: 'limit_order',
+                    limit_price: exits.takeProfit,
+                    reduce_only: true
+                });
+                closingOrderId = closingOrder.id || null;
+                this.log('trade', `📋 CLOSING ORDER placed: ${closingSide.toUpperCase()} ${quantity}x ${symbol} @ ${exits.takeProfit} (reduce-only limit)`);
+            } catch (closeErr) {
+                this.log('warning', `⚠️ Closing order failed for ${symbol}: ${closeErr.message} — SL still active as safety`);
+            }
 
             // Record trade in DB with comprehensive reasoning
             db.addTrade({
@@ -374,6 +393,8 @@ class BotEngine {
                     confidence: signal.confidence,
                     takeProfit: exits.takeProfit,
                     stopLoss: exits.stopLoss,
+                    closingOrderId: closingOrderId,
+                    closingSide: closingSide,
                     reason: signal.reason,
                     humanReason: humanReason,
                     strategy: strategyName,
@@ -390,13 +411,14 @@ class BotEngine {
 
             riskManager.setCooldown(symbol);
 
-            this.log('success', `🎯 FILLED: ${signal.side.toUpperCase()} ${quantity}x ${symbol} @ ~${price} | TP: ${exits.takeProfit} | SL: ${exits.stopLoss} | ${strategyName} — ${humanReason}`);
+            this.log('success', `🎯 FILLED: ${signal.side.toUpperCase()} ${quantity}x ${symbol} @ ~${price} | Closing @ ${exits.takeProfit} | SL: ${exits.stopLoss} | ${strategyName} — ${humanReason}`);
 
             // Emit trade + refresh events
             if (this.io) {
                 this.io.emit('bot:trade', {
                     symbol, side: signal.side, quantity, price,
                     takeProfit: exits.takeProfit, stopLoss: exits.stopLoss,
+                    closingOrderId: closingOrderId,
                     strategy: strategyName, reason: humanReason,
                     tradeReasoning,
                     timestamp: new Date().toISOString()
@@ -438,24 +460,71 @@ class BotEngine {
         return parts.join(' | ');
     }
 
+    /**
+     * Reconcile DB open trades with actual exchange positions.
+     * Runs at the START of every scan to ensure DB is in sync
+     * before checking limits or placing new orders.
+     */
     async checkOpenPositions() {
         try {
             const positions = await deltaApi.getPositions();
             const openTrades = db.getOpenTrades();
 
+            if (openTrades.length === 0) return; // Nothing to reconcile
+
+            this.log('info', `🔄 Reconciling ${openTrades.length} DB open trade(s) with exchange...`);
+            let closedCount = 0;
+
             for (const trade of openTrades) {
                 const position = positions.find(p => p.symbol === trade.symbol);
-                if (!position || parseFloat(position.size) === 0) {
-                    const pnl = position ? parseFloat(position.realized_pnl || 0) : 0;
+                const hasActivePosition = position && parseFloat(position.size) !== 0;
+
+                if (!hasActivePosition) {
+                    // Position is closed on exchange — sync DB
+                    let pnl = 0;
+
+                    // Try to get realized PnL from the position data
+                    if (position && position.realized_pnl) {
+                        pnl = parseFloat(position.realized_pnl);
+                    }
+
+                    // Try to get better PnL from recent fills
+                    try {
+                        const product = this.products.find(p => p.symbol === trade.symbol);
+                        if (product) {
+                            const fills = await deltaApi.getFills({ product_id: product.id });
+                            if (fills && fills.length > 0) {
+                                // Sum recent fill PnL for this symbol
+                                const recentFills = fills.filter(f => {
+                                    const fillTime = new Date(f.created_at || f.timestamp).getTime();
+                                    const tradeTime = new Date(trade.entry_time).getTime();
+                                    return fillTime > tradeTime;
+                                });
+                                if (recentFills.length > 0) {
+                                    const fillPnl = recentFills.reduce((sum, f) => sum + parseFloat(f.realized_pnl || 0), 0);
+                                    if (fillPnl !== 0) pnl = fillPnl;
+                                }
+                            }
+                        }
+                    } catch (e) { /* use position PnL as fallback */ }
+
                     db.closeTrade(trade.id, trade.price, pnl);
                     db.updateDailyStats(pnl > 0, pnl);
+                    closedCount++;
 
-                    const icon = pnl > 0 ? '🟢' : '🔴';
-                    this.log('trade', `${icon} CLOSED: ${trade.symbol} | P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} | ${trade.strategy}`);
+                    const icon = pnl > 0 ? '🟢' : (pnl < 0 ? '🔴' : '⚪');
+                    this.log('trade', `${icon} RECONCILED CLOSED: ${trade.symbol} | P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} | ${trade.strategy}`);
                     this.emitDashboardRefresh();
                 }
             }
-        } catch (error) { /* silent */ }
+
+            if (closedCount > 0) {
+                const remaining = openTrades.length - closedCount;
+                this.log('success', `✅ Reconciled: ${closedCount} trade(s) closed on exchange. ${remaining} still open.`);
+            }
+        } catch (error) {
+            this.log('warning', `⚠️ Position reconciliation failed: ${error.message} — Will retry next scan`);
+        }
     }
 
     sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
