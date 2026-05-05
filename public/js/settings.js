@@ -1,6 +1,6 @@
 /**
  * Settings Module - Settings page logic with live exchange rate
- * Fixed: Shows actual Delta wallet balance (available_balance), not equity
+ * v2.3: Position sync, manual refresh, auto-refresh interval
  */
 const Settings = {
     settings: {},
@@ -10,6 +10,7 @@ const Settings = {
     async init() {
         await this.loadSettings();
         await this.fetchBalance();
+        await this.loadSyncStatus();
     },
 
     async loadSettings() {
@@ -149,6 +150,7 @@ const Settings = {
         }
 
         if (s.cooldown_minutes) document.getElementById('settingCooldown').value = s.cooldown_minutes;
+        if (s.auto_refresh_minutes) document.getElementById('settingAutoRefresh').value = s.auto_refresh_minutes;
 
         document.getElementById('infoBotVersion').textContent = 'v' + (s.botVersion || '2.0.0');
         document.getElementById('infoStrategyCount').textContent = s.strategyCount || 15;
@@ -217,7 +219,8 @@ const Settings = {
             trade_qty_mode: document.getElementById('settingQtyMode').value,
             manual_qty: document.getElementById('settingManualQty').value,
             leverage: document.getElementById('settingLeverage').value,
-            cooldown_minutes: document.getElementById('settingCooldown').value
+            cooldown_minutes: document.getElementById('settingCooldown').value,
+            auto_refresh_minutes: document.getElementById('settingAutoRefresh').value
         };
 
         const apiKey = document.getElementById('settingApiKey').value.trim();
@@ -304,6 +307,77 @@ const Settings = {
             document.execCommand('copy');
             document.body.removeChild(input);
             App.showToast('IPv6 copied!', 'success');
+        }
+    },
+
+    // === Position Sync ===
+
+    async loadSyncStatus() {
+        try {
+            const res = await fetch('/api/bot/status');
+            const status = await res.json();
+            document.getElementById('syncOpenCount').textContent = status.openTrades || 0;
+            document.getElementById('syncPendingSell').textContent = status.openTrades || 0;
+            if (status.lastRefresh) {
+                document.getElementById('syncLastRefresh').textContent = new Date(status.lastRefresh).toLocaleString('en-IN');
+            }
+        } catch (e) { /* ignore */ }
+    },
+
+    async refreshPositions() {
+        const btn = document.getElementById('btnRefreshPositions');
+        const resultDiv = document.getElementById('syncResult');
+        btn.disabled = true;
+        btn.textContent = '⏳ Syncing...';
+        resultDiv.style.display = 'none';
+
+        try {
+            const res = await fetch('/api/bot/refresh-positions', { method: 'POST' });
+            const data = await res.json();
+
+            if (data.success) {
+                // Update counts
+                document.getElementById('syncOpenCount').textContent = data.openTrades;
+                document.getElementById('syncPendingSell').textContent = data.openTrades;
+                document.getElementById('syncLastRefresh').textContent = new Date(data.lastRefresh).toLocaleString('en-IN');
+
+                // Show open trades list
+                const listDiv = document.getElementById('syncTradesList');
+                if (data.openTradesList && data.openTradesList.length > 0) {
+                    listDiv.innerHTML = data.openTradesList.map(t => `
+                        <div style="display:flex; justify-content:space-between; padding:6px 10px; margin:4px 0; background:rgba(255,255,255,0.03); border-radius:8px; font-size:12px;">
+                            <span style="color:var(--accent-cyan);font-weight:600;">${t.symbol.replace(/USDT$|USD$|INR$/, '')}</span>
+                            <span style="color:${t.side === 'buy' ? 'var(--accent-green)' : 'var(--accent-red)'}">${t.side.toUpperCase()} × ${t.quantity}</span>
+                            <span style="color:var(--text-muted);">@ $${parseFloat(t.price).toFixed(2)}</span>
+                        </div>
+                    `).join('');
+                } else {
+                    listDiv.innerHTML = '<div style="padding:8px;text-align:center;color:var(--text-muted);font-size:12px;">✅ No open positions — All sold/closed</div>';
+                }
+
+                // Show result summary
+                resultDiv.style.display = 'block';
+                resultDiv.style.background = 'rgba(0,255,136,0.08)';
+                resultDiv.style.color = 'var(--accent-green)';
+                resultDiv.innerHTML = `✅ Synced! Open: ${data.openTrades} | Total: ${data.totalTrades} | P&L: $${parseFloat(data.totalPnl || 0).toFixed(2)} | Win: ${data.winRate}%`;
+
+                App.showToast(`🔄 Positions synced! ${data.openTrades} open`, 'success');
+            } else {
+                resultDiv.style.display = 'block';
+                resultDiv.style.background = 'rgba(255,68,68,0.08)';
+                resultDiv.style.color = 'var(--accent-red)';
+                resultDiv.innerHTML = `❌ ${data.error || 'Sync failed'}`;
+                App.showToast('Sync failed', 'error');
+            }
+        } catch (error) {
+            resultDiv.style.display = 'block';
+            resultDiv.style.background = 'rgba(255,68,68,0.08)';
+            resultDiv.style.color = 'var(--accent-red)';
+            resultDiv.innerHTML = `❌ Error: ${error.message}`;
+            App.showToast('Failed to sync positions', 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '🔄 Refresh Now';
         }
     }
 };

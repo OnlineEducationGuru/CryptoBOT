@@ -97,6 +97,16 @@ async function startServer() {
         res.json(botEngine.getStatus());
     });
 
+    // Manual position refresh — reconcile DB with Delta Exchange
+    app.post('/api/bot/refresh-positions', async (req, res) => {
+        try {
+            const result = await botEngine.refreshPositions();
+            res.json(result);
+        } catch (error) {
+            res.status(500).json({ success: false, error: error.message });
+        }
+    });
+
     // --- Dashboard Data ---
     app.get('/api/dashboard', async (req, res) => {
         try {

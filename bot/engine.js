@@ -1,7 +1,7 @@
 /**
  * Core Bot Trading Engine
  * Handles market scanning, strategy execution, order placement, and lifecycle
- * v2.2: Fixed stale position tracking, closing order flow (not TP)
+ * v2.3: Position reconciliation with closing order cleanup, manual refresh, auto-refresh
  */
 const deltaApi = require('./delta-api');
 const strategyManager = require('./strategies');
@@ -13,6 +13,7 @@ class BotEngine {
     constructor() {
         this.running = false;
         this.scanTimer = null;
+        this.autoRefreshTimer = null;
         this.io = null;
         this.products = [];
         this.scanInterval = 5000;
@@ -21,6 +22,7 @@ class BotEngine {
         this.tradesPlacedThisScan = 0;
         // Fresh research: no caching of any market data
         this._lastScanTimestamp = null;
+        this._lastRefreshTimestamp = null;
     }
 
     setIO(io) {
@@ -100,6 +102,7 @@ class BotEngine {
         this.emitStatus();
         const strategy = strategyManager.getActiveStrategy();
         this.log('success', `✅ Bot started | Strategy: ${strategy.name} (${strategy.getInfo().winRate}% win) | Scanning all cryptos...`);
+        this.startAutoRefresh();
         this.scanLoop();
     }
 
@@ -107,8 +110,25 @@ class BotEngine {
         if (!this.running) { this.log('warning', 'Bot is not running'); return; }
         this.running = false;
         if (this.scanTimer) { clearTimeout(this.scanTimer); this.scanTimer = null; }
+        if (this.autoRefreshTimer) { clearInterval(this.autoRefreshTimer); this.autoRefreshTimer = null; }
         this.emitStatus();
         this.log('info', `🛑 Bot stopped | Total scans: ${this.scanCount}`);
+    }
+
+    /**
+     * Start auto-refresh timer to periodically reconcile positions
+     * Interval is configurable via 'auto_refresh_minutes' setting
+     */
+    startAutoRefresh() {
+        if (this.autoRefreshTimer) clearInterval(this.autoRefreshTimer);
+        const minutes = parseInt(db.getSetting('auto_refresh_minutes', '5'));
+        if (minutes <= 0) return;
+        this.autoRefreshTimer = setInterval(async () => {
+            if (!this.running) return;
+            this.log('info', `🔄 Auto-refresh: Reconciling positions with Delta Exchange...`);
+            await this.checkOpenPositions();
+        }, minutes * 60 * 1000);
+        this.log('info', `⏰ Auto-refresh set: Every ${minutes} minute(s)`);
     }
 
     async scanLoop() {
@@ -464,6 +484,11 @@ class BotEngine {
      * Reconcile DB open trades with actual exchange positions.
      * Runs at the START of every scan to ensure DB is in sync
      * before checking limits or placing new orders.
+     *
+     * Handles:
+     * - Closing order filled on exchange → detect position gone, cancel leftover orders
+     * - User manually sold on Delta → detect position gone, show P&L
+     * - Only tracks trades the BOT placed (DB trades), never touches manual positions
      */
     async checkOpenPositions() {
         try {
@@ -480,8 +505,9 @@ class BotEngine {
                 const hasActivePosition = position && parseFloat(position.size) !== 0;
 
                 if (!hasActivePosition) {
-                    // Position is closed on exchange — sync DB
+                    // Position is closed on exchange (closing order filled OR manual sell)
                     let pnl = 0;
+                    let closedBy = 'unknown';
 
                     // Try to get realized PnL from the position data
                     if (position && position.realized_pnl) {
@@ -489,12 +515,11 @@ class BotEngine {
                     }
 
                     // Try to get better PnL from recent fills
+                    const product = this.products.find(p => p.symbol === trade.symbol);
                     try {
-                        const product = this.products.find(p => p.symbol === trade.symbol);
                         if (product) {
                             const fills = await deltaApi.getFills({ product_id: product.id });
                             if (fills && fills.length > 0) {
-                                // Sum recent fill PnL for this symbol
                                 const recentFills = fills.filter(f => {
                                     const fillTime = new Date(f.created_at || f.timestamp).getTime();
                                     const tradeTime = new Date(trade.entry_time).getTime();
@@ -503,17 +528,36 @@ class BotEngine {
                                 if (recentFills.length > 0) {
                                     const fillPnl = recentFills.reduce((sum, f) => sum + parseFloat(f.realized_pnl || 0), 0);
                                     if (fillPnl !== 0) pnl = fillPnl;
+                                    // Determine how it was closed
+                                    const lastFill = recentFills[recentFills.length - 1];
+                                    closedBy = lastFill.meta_data?.reason || lastFill.role || 'filled';
                                 }
                             }
                         }
                     } catch (e) { /* use position PnL as fallback */ }
+
+                    // === CANCEL any leftover closing orders for this symbol ===
+                    try {
+                        const notes = trade.notes ? (typeof trade.notes === 'string' ? JSON.parse(trade.notes) : trade.notes) : {};
+                        if (notes.closingOrderId && product) {
+                            await deltaApi.cancelOrder(notes.closingOrderId, product.id);
+                            this.log('info', `🗑️ Cancelled leftover closing order #${notes.closingOrderId} for ${trade.symbol}`);
+                        } else if (product) {
+                            // Cancel ALL open orders for this product (safety cleanup)
+                            await deltaApi.cancelAllOrders(product.id);
+                            this.log('info', `🗑️ Cancelled all open orders for ${trade.symbol}`);
+                        }
+                    } catch (cancelErr) {
+                        // Order may already be filled/cancelled — that's fine
+                        this.log('info', `ℹ️ No leftover orders to cancel for ${trade.symbol}`);
+                    }
 
                     db.closeTrade(trade.id, trade.price, pnl);
                     db.updateDailyStats(pnl > 0, pnl);
                     closedCount++;
 
                     const icon = pnl > 0 ? '🟢' : (pnl < 0 ? '🔴' : '⚪');
-                    this.log('trade', `${icon} RECONCILED CLOSED: ${trade.symbol} | P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} | ${trade.strategy}`);
+                    this.log('trade', `${icon} CLOSED: ${trade.symbol} | P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} | ${trade.strategy} | Closed by: ${closedBy}`);
                     this.emitDashboardRefresh();
                 }
             }
@@ -522,9 +566,51 @@ class BotEngine {
                 const remaining = openTrades.length - closedCount;
                 this.log('success', `✅ Reconciled: ${closedCount} trade(s) closed on exchange. ${remaining} still open.`);
             }
+
+            this._lastRefreshTimestamp = Date.now();
         } catch (error) {
             this.log('warning', `⚠️ Position reconciliation failed: ${error.message} — Will retry next scan`);
         }
+    }
+
+    /**
+     * Manual refresh — callable from API endpoint
+     * Reconciles positions and returns summary
+     */
+    async refreshPositions() {
+        // Make sure products are loaded
+        if (this.products.length === 0) {
+            const apiKey = db.getEncryptedSetting('api_key');
+            const apiSecret = db.getEncryptedSetting('api_secret');
+            if (apiKey && apiSecret) {
+                deltaApi.setCredentials(apiKey, apiSecret);
+                await this.loadProducts();
+            }
+        }
+
+        this.log('info', '🔄 Manual refresh triggered by user');
+        await this.checkOpenPositions();
+
+        const openTrades = db.getOpenTrades();
+        const stats = db.getTradeStats();
+        return {
+            success: true,
+            openTrades: openTrades.length,
+            openTradesList: openTrades.map(t => ({
+                id: t.id,
+                symbol: t.symbol,
+                side: t.side,
+                price: t.price,
+                quantity: t.quantity,
+                strategy: t.strategy,
+                entry_time: t.entry_time
+            })),
+            totalTrades: stats.totalTrades,
+            closedTrades: stats.closedTrades,
+            totalPnl: stats.totalPnl,
+            winRate: stats.winRate,
+            lastRefresh: new Date().toISOString()
+        };
     }
 
     sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -535,7 +621,8 @@ class BotEngine {
             activeStrategy: strategyManager.getActiveStrategy()?.getInfo(),
             productsLoaded: this.tradeableProducts.length,
             openTrades: db.getOpenTrades().length,
-            scanCount: this.scanCount
+            scanCount: this.scanCount,
+            lastRefresh: this._lastRefreshTimestamp ? new Date(this._lastRefreshTimestamp).toISOString() : null
         };
     }
 }

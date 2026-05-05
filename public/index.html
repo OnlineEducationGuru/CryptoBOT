@@ -372,6 +372,51 @@
                 <button class="btn btn-primary" style="width:100%; padding:14px; font-size:16px; font-weight:700; border-radius:12px;" onclick="Settings.saveAllSettings()">💾 SAVE ALL SETTINGS</button>
             </div>
 
+            <!-- Position Sync -->
+            <div class="card settings-section">
+                <div class="settings-section-title">🔄 Position Sync</div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Open Positions (Bot)
+                        <span class="sub">Trades placed by bot that are still open</span>
+                    </span>
+                    <span class="info-value" id="syncOpenCount" style="font-size:18px; font-weight:700; color:var(--accent-yellow);">--</span>
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Pending to Sell
+                        <span class="sub">Bot's open positions awaiting closure</span>
+                    </span>
+                    <span class="info-value" id="syncPendingSell" style="font-size:18px; font-weight:700; color:var(--accent-cyan);">--</span>
+                </div>
+
+                <div id="syncTradesList" style="margin: 8px 0;"></div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Last Refresh
+                        <span class="sub">When positions were last synced with Delta</span>
+                    </span>
+                    <span class="info-value" id="syncLastRefresh" style="font-size:12px; color:var(--text-muted);">Never</span>
+                </div>
+
+                <div class="setting-row">
+                    <span class="setting-label">
+                        Auto-Refresh Interval
+                        <span class="sub">Minutes between automatic position sync (0 = off)</span>
+                    </span>
+                    <input type="text" inputmode="numeric" class="input-field" id="settingAutoRefresh" value="5">
+                </div>
+
+                <div style="margin-top:10px; display:flex; gap:8px;">
+                    <button class="btn btn-primary btn-sm" onclick="Settings.refreshPositions()" id="btnRefreshPositions" style="flex:1;">🔄 Refresh Now</button>
+                </div>
+
+                <div id="syncResult" style="margin-top:10px; padding:8px; border-radius:8px; display:none; font-size:12px;"></div>
+            </div>
+
             <!-- Bot Information -->
             <div class="card settings-section">
                 <div class="settings-section-title">ℹ️ Bot Information</div>
