@@ -23,6 +23,8 @@ class BotEngine {
         // Fresh research: no caching of any market data
         this._lastScanTimestamp = null;
         this._lastRefreshTimestamp = null;
+        // Delta Exchange actual position count (updated during sync)
+        this._deltaPositionCount = 0;
     }
 
     setIO(io) {
@@ -102,6 +104,9 @@ class BotEngine {
         this.emitStatus();
         const strategy = strategyManager.getActiveStrategy();
         this.log('success', `✅ Bot started | Strategy: ${strategy.name} (${strategy.getInfo().winRate}% win) | Scanning all cryptos...`);
+        // Sync Delta positions to DB BEFORE starting scans
+        // This ensures manual/external positions are counted toward limits
+        await this.syncDeltaPositionsToDb();
         this.startAutoRefresh();
         this.scanLoop();
     }
@@ -125,7 +130,8 @@ class BotEngine {
         if (minutes <= 0) return;
         this.autoRefreshTimer = setInterval(async () => {
             if (!this.running) return;
-            this.log('info', `🔄 Auto-refresh: Reconciling positions with Delta Exchange...`);
+            this.log('info', `🔄 Auto-refresh: Syncing positions with Delta Exchange...`);
+            await this.syncDeltaPositionsToDb();
             await this.checkOpenPositions();
         }, minutes * 60 * 1000);
         this.log('info', `⏰ Auto-refresh set: Every ${minutes} minute(s)`);
@@ -204,6 +210,9 @@ class BotEngine {
     checkGlobalLimits(settings, balance, sym) {
         const dailyStats = db.getTodayStats();
         const openTrades = db.getOpenTrades();
+        // Use the HIGHER of DB count or actual Delta position count
+        // This prevents opening too many trades when Delta has positions not yet in DB
+        const effectiveOpen = Math.max(openTrades.length, this._deltaPositionCount || 0);
 
         if (balance.available <= settings.minBalance) {
             return { allowed: false, reason: `💰 Balance exhausted: ${sym}${balance.available.toFixed(2)} ≤ min ${sym}${settings.minBalance} — Pausing trades` };
@@ -214,8 +223,8 @@ class BotEngine {
         if (Math.abs(dailyStats.total_loss) >= settings.maxDailyLoss) {
             return { allowed: false, reason: `🔴 Daily loss limit: ${sym}${Math.abs(dailyStats.total_loss).toFixed(2)} ≥ ${sym}${settings.maxDailyLoss} — Pausing` };
         }
-        if (openTrades.length >= settings.maxOpenPositions) {
-            return { allowed: false, reason: `📈 Max open positions: ${openTrades.length}/${settings.maxOpenPositions} — Pausing new orders` };
+        if (effectiveOpen >= settings.maxOpenPositions) {
+            return { allowed: false, reason: `📈 Max open positions: ${effectiveOpen}/${settings.maxOpenPositions} (Delta: ${this._deltaPositionCount || 0}, Bot DB: ${openTrades.length}) — Pausing new orders` };
         }
         return { allowed: true };
     }
@@ -228,7 +237,8 @@ class BotEngine {
 
         // === RE-CHECK OPEN POSITIONS LIMIT (may change during scan) ===
         const currentOpen = db.getOpenTrades();
-        if (currentOpen.length >= settings.maxOpenPositions) {
+        const effectiveOpen = Math.max(currentOpen.length, this._deltaPositionCount || 0);
+        if (effectiveOpen >= settings.maxOpenPositions) {
             stats.riskBlocked++;
             return; // Don't spam — already logged at global level
         }
@@ -288,10 +298,11 @@ class BotEngine {
 
         this.log('success', `✅ VALID: ${symbol} | Score: ${validation.confidence}% | ${validation.passedCount}/${validation.totalChecks} checks passed`);
 
-        // === FINAL PRE-TRADE SAFETY CHECK ===
+        // === FINAL PRE-TRADE SAFETY CHECK (uses both DB and Delta counts) ===
         const finalOpen = db.getOpenTrades();
-        if (finalOpen.length >= settings.maxOpenPositions) {
-            this.log('warning', `⛔ ${symbol}: Max positions reached just before order (${finalOpen.length}/${settings.maxOpenPositions})`);
+        const finalEffective = Math.max(finalOpen.length, this._deltaPositionCount || 0);
+        if (finalEffective >= settings.maxOpenPositions) {
+            this.log('warning', `⛔ ${symbol}: Max positions reached just before order (${finalEffective}/${settings.maxOpenPositions} — Delta: ${this._deltaPositionCount || 0}, DB: ${finalOpen.length})`);
             return;
         }
 
@@ -588,10 +599,74 @@ class BotEngine {
     }
 
     /**
+     * Sync Delta Exchange positions into Bot DB
+     * Ensures manual/external positions on Delta are tracked in the DB
+     * so limit checks correctly count ALL open positions.
+     *
+     * Called at: bot start, auto-refresh, manual refresh
+     */
+    async syncDeltaPositionsToDb() {
+        try {
+            if (this.tradeableProducts.length === 0) {
+                this.log('info', '📋 No products loaded — skipping Delta sync');
+                return;
+            }
+
+            const deltaPositions = await deltaApi.getAllPositions(this.tradeableProducts);
+            this._deltaPositionCount = deltaPositions.length;
+
+            const openTrades = db.getOpenTrades();
+            let syncedCount = 0;
+
+            for (const pos of deltaPositions) {
+                const symbol = pos.symbol;
+                if (!symbol) continue;
+
+                // Check if this Delta position is already tracked in bot DB
+                const inDb = openTrades.find(t => t.symbol === symbol);
+                if (!inDb) {
+                    // Position exists on Delta but NOT in bot DB → add synced entry
+                    const size = parseFloat(pos.size || 0);
+                    const side = size > 0 ? 'buy' : 'sell';
+
+                    db.addTrade({
+                        trade_id: `SYNC_${Date.now()}_${pos.product_id || Math.random().toString(36).substr(2, 8)}`,
+                        symbol: symbol,
+                        side: side,
+                        order_type: 'synced',
+                        price: parseFloat(pos.entry_price || pos.mark_price || 0),
+                        quantity: Math.abs(size),
+                        strategy: 'manual/synced',
+                        status: 'open',
+                        notes: JSON.stringify({
+                            source: 'delta_sync',
+                            synced_at: new Date().toISOString(),
+                            product_id: pos.product_id,
+                            mark_price: parseFloat(pos.mark_price || 0),
+                            unrealized_pnl: parseFloat(pos.unrealized_pnl || 0),
+                            margin: parseFloat(pos.margin || 0)
+                        })
+                    });
+                    syncedCount++;
+                    this.log('info', `📥 Synced Delta position → DB: ${symbol} (${side.toUpperCase()} × ${Math.abs(size)})`);
+                }
+            }
+
+            if (syncedCount > 0) {
+                this.log('success', `✅ Synced ${syncedCount} Delta position(s) to bot DB. Total open: ${db.getOpenTrades().length}`);
+                this.emitDashboardRefresh();
+            }
+
+            this.log('info', `📊 Positions — Delta: ${deltaPositions.length} | Bot DB: ${db.getOpenTrades().length}`);
+        } catch (error) {
+            this.log('warning', `⚠️ Delta position sync failed: ${error.message}`);
+        }
+    }
+
+    /**
      * Manual refresh — callable from API endpoint
-     * Reconciles positions with exchange, then if bot is running
-     * and slots opened up, triggers an IMMEDIATE scan so the bot
-     * knows the current situation and acts accordingly.
+     * Syncs Delta positions to DB, reconciles, then if bot is running
+     * and slots opened up, triggers an IMMEDIATE scan.
      */
     async refreshPositions() {
         // Make sure API is ready and products loaded
@@ -604,16 +679,20 @@ class BotEngine {
             }
         }
 
-        // === Fetch ALL Delta Exchange positions for display ===
+        // === Step 1: Sync Delta positions into DB (add missing ones) ===
+        await this.syncDeltaPositionsToDb();
+
+        // === Step 2: Fetch ALL Delta Exchange positions for display ===
         let deltaPositions = [];
         try {
             deltaPositions = await deltaApi.getAllPositions(this.tradeableProducts);
+            this._deltaPositionCount = deltaPositions.length;
             this.log('info', `📊 Delta Exchange: ${deltaPositions.length} active position(s) found`);
         } catch (e) {
             this.log('warning', `⚠️ Failed to fetch Delta positions: ${e.message}`);
         }
 
-        // === Fetch fresh balance ===
+        // === Step 3: Fetch fresh balance ===
         let balance = null;
         try {
             const settings = riskManager.getSettings();
@@ -623,6 +702,7 @@ class BotEngine {
             this.log('warning', `⚠️ Failed to fetch balance: ${e.message}`);
         }
 
+        // === Step 4: Reconcile — close stale DB trades ===
         const beforeOpen = db.getOpenTrades().length;
         this.log('info', '🔄 Manual refresh triggered by user');
         await this.checkOpenPositions();
