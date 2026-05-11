@@ -314,9 +314,46 @@ class DeltaExchangeAPI {
         return { available: 0, balance: 0, walletBalance: 0, equity: 0, depositBalance: 0, totalBalance: 0, marginUsed: 0, locked: 0, unrealizedPnl: 0, assetSymbol: asset };
     }
 
-    async getPositions() {
-        const data = await this.privateGet('/v2/positions');
-        return (data.result || []).filter(p => parseFloat(p.size) !== 0);
+    /**
+     * Get positions for specific product IDs from Delta Exchange
+     * Delta API requires product_id or underlying_asset_symbol — cannot fetch all without params
+     * Uses /v2/positions/margined endpoint with product_ids in batches of 10
+     */
+    async getPositions(productIds = []) {
+        if (productIds.length === 0) return [];
+
+        const allPositions = [];
+        // Delta API allows max 10 product_ids per request
+        for (let i = 0; i < productIds.length; i += 10) {
+            const batch = productIds.slice(i, i + 10);
+            try {
+                const data = await this.privateGet('/v2/positions/margined', {
+                    product_ids: batch.join(',')
+                });
+                const results = data.result || [];
+                allPositions.push(...results);
+            } catch (e) {
+                console.log(`[POSITIONS] Batch fetch error for IDs [${batch.join(',')}]: ${e.message}`);
+            }
+        }
+
+        // Normalize symbol field (API may use product_symbol instead of symbol)
+        return allPositions
+            .map(p => ({
+                ...p,
+                symbol: p.symbol || p.product_symbol || (p.product && p.product.symbol) || ''
+            }))
+            .filter(p => parseFloat(p.size) !== 0);
+    }
+
+    /**
+     * Get ALL active positions across all given products
+     * Used to display complete Delta Exchange position overview
+     */
+    async getAllPositions(products = []) {
+        if (products.length === 0) return [];
+        const productIds = products.map(p => p.id);
+        return this.getPositions(productIds);
     }
 
     async getOpenOrders(productId = null) {

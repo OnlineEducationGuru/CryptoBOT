@@ -374,25 +374,39 @@
 
             <!-- Position Sync -->
             <div class="card settings-section">
-                <div class="settings-section-title">🔄 Position Sync</div>
+                <div class="settings-section-title">🔄 Position Sync & Refresh</div>
 
-                <div class="setting-row">
-                    <span class="setting-label">
-                        Open Positions (Bot)
-                        <span class="sub">Trades placed by bot that are still open</span>
-                    </span>
-                    <span class="info-value" id="syncOpenCount" style="font-size:18px; font-weight:700; color:var(--accent-yellow);">--</span>
+                <!-- Delta Exchange Positions (Actual Exchange Data) -->
+                <div style="margin-bottom:12px;">
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                        <span style="font-size:14px; font-weight:700; color:var(--accent-cyan);">📡 Delta Exchange Positions</span>
+                        <span id="syncDeltaCount" style="font-size:12px; padding:2px 8px; border-radius:12px; background:rgba(0,200,255,0.12); color:var(--accent-cyan);">--</span>
+                    </div>
+                    <div id="syncDeltaPositions" style="margin:4px 0;">
+                        <div style="padding:8px;text-align:center;color:var(--text-muted);font-size:12px;">Click "Refresh Now" to load Delta positions</div>
+                    </div>
                 </div>
 
-                <div class="setting-row">
-                    <span class="setting-label">
-                        Pending to Sell
-                        <span class="sub">Bot's open positions awaiting closure</span>
-                    </span>
-                    <span class="info-value" id="syncPendingSell" style="font-size:18px; font-weight:700; color:var(--accent-cyan);">--</span>
+                <div style="height:1px; background:rgba(255,255,255,0.06); margin:12px 0;"></div>
+
+                <!-- Bot Positions (DB Tracked) -->
+                <div style="margin-bottom:12px;">
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                        <span style="font-size:14px; font-weight:700; color:var(--accent-yellow);">🤖 Bot Positions (DB)</span>
+                        <span id="syncOpenCount" style="font-size:12px; padding:2px 8px; border-radius:12px; background:rgba(255,200,0,0.12); color:var(--accent-yellow);">--</span>
+                    </div>
+                    <div id="syncTradesList" style="margin:4px 0;">
+                        <div style="padding:8px;text-align:center;color:var(--text-muted);font-size:12px;">Click "Refresh Now" to sync bot positions</div>
+                    </div>
                 </div>
 
-                <div id="syncTradesList" style="margin: 8px 0;"></div>
+                <div style="height:1px; background:rgba(255,255,255,0.06); margin:12px 0;"></div>
+
+                <!-- Balance Info -->
+                <div id="syncBalanceInfo" style="margin-bottom:12px; display:none;">
+                    <div style="font-size:13px; font-weight:600; color:var(--accent-green); margin-bottom:6px;">💰 Account Balance</div>
+                    <div id="syncBalanceDetails" style="font-size:12px; color:var(--text-secondary);"></div>
+                </div>
 
                 <div class="setting-row">
                     <span class="setting-label">
@@ -411,7 +425,7 @@
                 </div>
 
                 <div style="margin-top:10px; display:flex; gap:8px;">
-                    <button class="btn btn-primary btn-sm" onclick="Settings.refreshPositions()" id="btnRefreshPositions" style="flex:1;">🔄 Refresh Now</button>
+                    <button class="btn btn-primary btn-sm" onclick="Settings.refreshPositions()" id="btnRefreshPositions" style="flex:1; padding:12px; font-size:14px; font-weight:700;">🔄 Refresh Now</button>
                 </div>
 
                 <div id="syncResult" style="margin-top:10px; padding:8px; border-radius:8px; display:none; font-size:12px;"></div>

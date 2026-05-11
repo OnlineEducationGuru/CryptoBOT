@@ -317,18 +317,114 @@ const Settings = {
             const res = await fetch('/api/bot/status');
             const status = await res.json();
             document.getElementById('syncOpenCount').textContent = status.openTrades || 0;
-            document.getElementById('syncPendingSell').textContent = status.openTrades || 0;
             if (status.lastRefresh) {
                 document.getElementById('syncLastRefresh').textContent = new Date(status.lastRefresh).toLocaleString('en-IN');
             }
         } catch (e) { /* ignore */ }
     },
 
+    /**
+     * Render Delta Exchange positions list
+     */
+    renderDeltaPositions(positions) {
+        const container = document.getElementById('syncDeltaPositions');
+        const countBadge = document.getElementById('syncDeltaCount');
+
+        countBadge.textContent = positions.length;
+
+        if (!positions || positions.length === 0) {
+            container.innerHTML = '<div style="padding:8px;text-align:center;color:var(--text-muted);font-size:12px;">✅ No active positions on Delta Exchange</div>';
+            return;
+        }
+
+        container.innerHTML = positions.map(p => {
+            const pnlColor = p.unrealized_pnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+            const pnlSign = p.unrealized_pnl >= 0 ? '+' : '';
+            const sideColor = p.side === 'buy' ? 'var(--accent-green)' : 'var(--accent-red)';
+            const shortSymbol = (p.symbol || '').replace(/USDT$|USD$|INR$/, '');
+
+            return `
+                <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; padding:8px 10px; margin:4px 0; background:rgba(255,255,255,0.03); border-radius:8px; font-size:12px; gap:4px;">
+                    <span style="color:var(--accent-cyan);font-weight:700; min-width:70px;">${shortSymbol}</span>
+                    <span style="color:${sideColor}; font-weight:600;">${p.side.toUpperCase()} × ${Math.abs(p.size)}</span>
+                    <span style="color:var(--text-muted);">Entry: $${p.entry_price.toFixed(2)}</span>
+                    <span style="color:var(--text-muted);">Mark: $${p.mark_price.toFixed(2)}</span>
+                    <span style="color:${pnlColor}; font-weight:700;">${pnlSign}$${p.unrealized_pnl.toFixed(2)}</span>
+                </div>`;
+        }).join('');
+    },
+
+    /**
+     * Render Bot DB positions list
+     */
+    renderBotPositions(trades) {
+        const container = document.getElementById('syncTradesList');
+        const countBadge = document.getElementById('syncOpenCount');
+
+        countBadge.textContent = trades.length;
+
+        if (!trades || trades.length === 0) {
+            container.innerHTML = '<div style="padding:8px;text-align:center;color:var(--text-muted);font-size:12px;">✅ No open bot positions — All sold/closed</div>';
+            return;
+        }
+
+        container.innerHTML = trades.map(t => {
+            const sideColor = t.side === 'buy' ? 'var(--accent-green)' : 'var(--accent-red)';
+            const shortSymbol = (t.symbol || '').replace(/USDT$|USD$|INR$/, '');
+            const time = t.entry_time ? new Date(t.entry_time).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+
+            return `
+                <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; padding:8px 10px; margin:4px 0; background:rgba(255,255,255,0.03); border-radius:8px; font-size:12px; gap:4px;">
+                    <span style="color:var(--accent-yellow);font-weight:700; min-width:70px;">${shortSymbol}</span>
+                    <span style="color:${sideColor}; font-weight:600;">${t.side.toUpperCase()} × ${t.quantity}</span>
+                    <span style="color:var(--text-muted);">@ $${parseFloat(t.price).toFixed(2)}</span>
+                    <span style="color:var(--text-muted);font-size:10px;">${t.strategy || ''}</span>
+                    <span style="color:var(--text-muted);font-size:10px;">${time}</span>
+                </div>`;
+        }).join('');
+    },
+
+    /**
+     * Render account balance info
+     */
+    renderBalanceInfo(balance) {
+        const container = document.getElementById('syncBalanceInfo');
+        const details = document.getElementById('syncBalanceDetails');
+
+        if (!balance) {
+            container.style.display = 'none';
+            return;
+        }
+
+        container.style.display = 'block';
+        const sym = (balance.assetSymbol === 'INR') ? '₹' : '$';
+
+        details.innerHTML = `
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px;">
+                <div style="padding:6px 8px; background:rgba(255,255,255,0.03); border-radius:6px;">
+                    <div style="color:var(--text-muted);font-size:10px;">Available</div>
+                    <div style="color:var(--accent-green);font-weight:700;">${sym}${(balance.available || 0).toFixed(2)}</div>
+                </div>
+                <div style="padding:6px 8px; background:rgba(255,255,255,0.03); border-radius:6px;">
+                    <div style="color:var(--text-muted);font-size:10px;">Equity</div>
+                    <div style="color:var(--accent-cyan);font-weight:700;">${sym}${(balance.equity || 0).toFixed(2)}</div>
+                </div>
+                <div style="padding:6px 8px; background:rgba(255,255,255,0.03); border-radius:6px;">
+                    <div style="color:var(--text-muted);font-size:10px;">Margin Used</div>
+                    <div style="font-weight:600;">${sym}${(balance.marginUsed || 0).toFixed(2)}</div>
+                </div>
+                <div style="padding:6px 8px; background:rgba(255,255,255,0.03); border-radius:6px;">
+                    <div style="color:var(--text-muted);font-size:10px;">Unrealized P&L</div>
+                    <div style="color:${(balance.unrealizedPnl || 0) >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'};font-weight:700;">${(balance.unrealizedPnl || 0) >= 0 ? '+' : ''}${sym}${(balance.unrealizedPnl || 0).toFixed(2)}</div>
+                </div>
+            </div>`;
+    },
+
     async refreshPositions() {
         const btn = document.getElementById('btnRefreshPositions');
         const resultDiv = document.getElementById('syncResult');
         btn.disabled = true;
-        btn.textContent = '⏳ Syncing...';
+        btn.textContent = '⏳ Syncing with Delta...';
         resultDiv.style.display = 'none';
 
         try {
@@ -336,32 +432,41 @@ const Settings = {
             const data = await res.json();
 
             if (data.success) {
-                // Update counts
-                document.getElementById('syncOpenCount').textContent = data.openTrades;
-                document.getElementById('syncPendingSell').textContent = data.openTrades;
+                // === Render Delta Exchange Positions ===
+                this.renderDeltaPositions(data.deltaPositions || []);
+
+                // === Render Bot DB Positions ===
+                this.renderBotPositions(data.openTradesList || []);
+
+                // === Render Balance Info ===
+                this.renderBalanceInfo(data.balance);
+
+                // === Update last refresh time ===
                 document.getElementById('syncLastRefresh').textContent = new Date(data.lastRefresh).toLocaleString('en-IN');
 
-                // Show open trades list
-                const listDiv = document.getElementById('syncTradesList');
-                if (data.openTradesList && data.openTradesList.length > 0) {
-                    listDiv.innerHTML = data.openTradesList.map(t => `
-                        <div style="display:flex; justify-content:space-between; padding:6px 10px; margin:4px 0; background:rgba(255,255,255,0.03); border-radius:8px; font-size:12px;">
-                            <span style="color:var(--accent-cyan);font-weight:600;">${t.symbol.replace(/USDT$|USD$|INR$/, '')}</span>
-                            <span style="color:${t.side === 'buy' ? 'var(--accent-green)' : 'var(--accent-red)'}">${t.side.toUpperCase()} × ${t.quantity}</span>
-                            <span style="color:var(--text-muted);">@ $${parseFloat(t.price).toFixed(2)}</span>
-                        </div>
-                    `).join('');
-                } else {
-                    listDiv.innerHTML = '<div style="padding:8px;text-align:center;color:var(--text-muted);font-size:12px;">✅ No open positions — All sold/closed</div>';
-                }
+                // Build status message
+                let statusParts = [];
+                statusParts.push(`Delta: ${(data.deltaPositions || []).length} position(s)`);
+                statusParts.push(`Bot: ${data.openTrades}/${data.maxPositions} open`);
+                if (data.slotsFreed > 0) statusParts.push(`🆓 ${data.slotsFreed} freed`);
+                statusParts.push(`${data.slotsAvailable} slot(s) available`);
+                if (data.scanTriggered) statusParts.push('🚀 Scan triggered!');
+                else if (data.botRunning) statusParts.push('⏳ Next scan will trade');
+                else statusParts.push('⏹️ Bot stopped');
 
                 // Show result summary
                 resultDiv.style.display = 'block';
-                resultDiv.style.background = 'rgba(0,255,136,0.08)';
+                resultDiv.style.background = data.scanTriggered ? 'rgba(0,255,136,0.12)' : 'rgba(0,255,136,0.06)';
                 resultDiv.style.color = 'var(--accent-green)';
-                resultDiv.innerHTML = `✅ Synced! Open: ${data.openTrades} | Total: ${data.totalTrades} | P&L: $${parseFloat(data.totalPnl || 0).toFixed(2)} | Win: ${data.winRate}%`;
+                resultDiv.innerHTML = `✅ ${statusParts.join(' | ')}`;
 
-                App.showToast(`🔄 Positions synced! ${data.openTrades} open`, 'success');
+                // Also refresh the budget/balance display on settings page
+                await this.fetchBalance();
+
+                const toastMsg = data.scanTriggered
+                    ? `🚀 ${data.slotsFreed} slot(s) freed — Bot scanning now!`
+                    : `🔄 Synced! Delta: ${(data.deltaPositions || []).length} | Bot: ${data.openTrades}/${data.maxPositions}`;
+                App.showToast(toastMsg, 'success');
             } else {
                 resultDiv.style.display = 'block';
                 resultDiv.style.background = 'rgba(255,68,68,0.08)';
